@@ -1,0 +1,22 @@
+# CLion / CMake build folders
+cmake-build-*/
+build/
+out/
+
+# CMake cache and generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+
+# IDE metadata
+.idea/
+*.iml
+
+# OS stuff
+.DS_Store
+
+# Executables
+smooth_axis_demo
+*.o
+*.a
