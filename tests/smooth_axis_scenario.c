@@ -180,9 +180,9 @@ void make_config_for_scenario(const scenario_t *sc,
     
     // We test the new "live-dt + settle_time" API only.
     // max_raw comes from the scenario; settle_time_sec is the user knob.
-    smooth_axis_default_config_live_dt(cfg,
-                                       user->max_raw,
-                                       user->settle_time_sec);
+    smooth_axis_default_config_live_deltatime(cfg,
+                                              user->max_raw,
+                                              user->settle_time_sec);
     cfg->full_off_norm = 0.0f;
     cfg->full_on_norm  = 1.0f;
 }
@@ -195,5 +195,5 @@ void update_axis_for_scenario_dt(const scenario_t *sc,
     if (!axis) { return; }
     
     // Test the dt-aware path only.
-    smooth_axis_update_live_dt(axis, raw, dt_step);
+    smooth_axis_update_live_deltatime(axis, raw, dt_step);
 }

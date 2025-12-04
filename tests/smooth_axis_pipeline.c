@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <math.h>
 
 
 #include "smooth_axis.h"
@@ -60,7 +61,7 @@ void find_start_and_final_outputs(const scenario_t *sc,
     update_axis_for_scenario_dt(sc, &axis, raw, dt_step);
 
     if (smooth_axis_has_new_value(&axis)) {
-      uint16_t nominal = smooth_axis_get_u16(&axis, user->max_out);
+      uint16_t nominal = smooth_axis_get_u16(&axis);
       if (!have_first_out) {
         first_out      = nominal;
         have_first_out = true;
@@ -129,7 +130,7 @@ float measure_settle_time(const scenario_t *sc,
     update_axis_for_scenario_dt(sc, &axis, raw, dt_step);
 
     if (smooth_axis_has_new_value(&axis)) {
-      uint16_t nominal = smooth_axis_get_u16(&axis, user->max_out);
+      uint16_t nominal = smooth_axis_get_u16(&axis);
       float out_f = (float)nominal;
 
       if (d > 0.0f) {
@@ -213,7 +214,7 @@ void dump_scenario_csv(const scenario_t *sc, const char *filename) {
 // Header row
   fprintf(f,
           "t_sec,dt_sec,raw_base,raw_noisy,has_new,out_u16,"
-          "noise_norm,thresh_norm\n");
+          "noise_norm,thresh_norm,acceleration\n");
 
   // Set up filter
   smooth_axis_config_t cfg;
@@ -227,6 +228,7 @@ void dump_scenario_csv(const scenario_t *sc, const char *filename) {
   int steps = (int)(env->duration_sec / env->dt_sec);
 
   uint16_t last_out = 0;
+  uint16_t current_smoothed = 0;
 
   for (int i = 0; i < steps; ++i) {
     float dt_step = step_dt_for_scenario(sc, &rng);
@@ -240,8 +242,9 @@ void dump_scenario_csv(const scenario_t *sc, const char *filename) {
     update_axis_for_scenario_dt(sc, &axis, noisy_raw, dt_step);
 
     int has_new = 0;
+//      current_smoothed = smooth_axis_get_u16(&axis, user->max_out);
     if (smooth_axis_has_new_value(&axis)) {
-      last_out = smooth_axis_get_u16(&axis, user->max_out);
+      last_out = smooth_axis_get_u16(&axis);
       has_new  = 1;
     }
 
@@ -255,7 +258,7 @@ void dump_scenario_csv(const scenario_t *sc, const char *filename) {
             (unsigned)base_raw,
             (unsigned)noisy_raw,
             has_new,
-            (unsigned)last_out,
+            last_out,
             noise_norm,
             thresh_norm);
 

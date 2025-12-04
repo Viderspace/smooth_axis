@@ -63,8 +63,8 @@ static void run_and_dump_scenario(scenario_t *sc) {
 
     build_scenario_name(sc);
 
-    // Optional: keep the timing/settle prints
-    run_scenario(sc);
+//    // Optional: keep the timing/settle prints
+//    run_scenario(sc);
 
     // Build CSV filename: smooth_axis_logs/smooth_axis_<name>.csv
     char filename[256];
@@ -79,7 +79,13 @@ static void run_scenario_with_name(scenario_t *sc) {
     run_scenario(sc);
 }
 
+#include <time.h>
+
 int main(void) {
+    clock_t start_time, end_time;
+    double cpu_time_used;
+    
+    start_time = clock();
     for (size_t ei = 0; ei < 5; ++ei) {
         const env_profile_t *env = &ENV_PROFILES[ei];
 
@@ -87,11 +93,24 @@ int main(void) {
             float        settle_time_sec = SETTLE_TIME_SEC_VALUES[ti];
 
             unsigned int seed            = (unsigned int)(1000u + ei * 100u + ti * 7u);
+//            unsigned int seed            = (unsigned int)(1002u + ei * 101u + ti * 7u);
 
             scenario_t   sc              = make_10bit_ramp_scenario(env, settle_time_sec, seed);
             run_and_dump_scenario(&sc);
         }
     }
-
+    
+    end_time = clock();
+    cpu_time_used = ((double)(end_time - start_time)) / CLOCKS_PER_SEC;
+    printf("CPU time taken: %f seconds\n", cpu_time_used);
+    
+    
+    
+    
+    size_t  size = sizeof (smooth_axis_t);
+    size_t  cfg_size = sizeof (smooth_axis_config_t);
+    printf("axis struct size = %ld\n", size);
+    printf("cfg struct size = %ld\n", cfg_size);
+    printf("total size = %ld\n", size + cfg_size);
     return 0;
 }
