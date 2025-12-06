@@ -36,13 +36,13 @@ static const float FALLBACK_DELTA_TIME        = 0.016f; // 16 ms
 static const float CANONICAL_MAX = 1023.0f;
 static const float FULL_OFF_U    = 0.0f;
 static const float FULL_ON_U     = 1023.0f;
-static const float STICKY_U      = 2.0f;
+static const float STICKY_U      = 3.0f;
 static const float MOVE_THRESH_U = 3.0f;
 
 static const float SMOOTH_AXIS_RESIDUAL = 0.05f;
 
 static const float BETA = 0.005f; // threshold sensitivity to noise fluctuations
-static const float K    = 2.0f; // Threshold headroom coefficient (1.0 = no headroom)
+static const float K    = 3.5f; // Threshold headroom coefficient (1.0 = no headroom)
 
 // ─────────────────────────────────────────────────────────────
 // Internal helpers
@@ -137,8 +137,9 @@ static float get_dynamic_thresh(const smooth_axis_t *axis) {
     float scaled = dyn_thresh * axis->cfg._dyn_scale;
     
     // Clamp relative to base threshold as before
-    return clamp_f(scaled, base_thresh, 10.0f * base_thresh);
+    return clamp_f(scaled, 0.0, 10.0f * base_thresh);
 }
+
 
 // ---------------------------------------------------------------------------
 // 2) Sticky / nominal helpers
@@ -203,12 +204,15 @@ static float ema_alpha_from_dt(const float k, const float dt_sec) {
 }
 
 #ifndef NDEBUG
+
 #include <stdio.h>
 #include <assert.h>
-static void handle_missing_time_source() {
+
+static void handle_missing_time_source(void) {
     fprintf(stderr, "smooth_axis_default_config_auto: now_ms is NULL\n");
     assert(0 && "AUTO mode requires non-NULL now_ms");
 }
+
 #endif
 
 static bool auto_warmup_has_finished(const smooth_axis_t *axis) {
@@ -428,12 +432,13 @@ bool smooth_axis_has_new_value(smooth_axis_t *axis) {
     
     float current = get_normalized(axis);
     float last    = axis->_last_reported_norm;
-    float diff    = current - last;
+    float diff    = abs_f(current - last);
     
-    if (diff < 0.0f) { diff = -diff; }
+    
     
     // If the change is smaller than one quantization step in norm space,
     // it cannot change the integer output → ignore.
+    
     uint16_t max_raw = axis->cfg.max_raw ? axis->cfg.max_raw : 1;
     float    epsilon = 1.0f / (float)max_raw;
     if (diff <= epsilon) {

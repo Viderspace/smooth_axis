@@ -179,7 +179,7 @@ void smooth_axis_update_live_deltatime(smooth_axis_t *axis,
 float smooth_axis_get_norm(const smooth_axis_t *axis);
 
 // Map nominal value to [0 .. max_out] (e.g. joystick / LED range).
-uint16_t smooth_axis_get_u16(const smooth_axis_t *axis);
+uint16_t smooth_axis_get_u16(smooth_axis_t *axis);
 
 // Convenience: map back to cfg.max_raw.
 uint16_t smooth_axis_get_u16_full(const smooth_axis_t *axis);
@@ -207,3 +207,25 @@ float smooth_axis_get_effective_thresh_norm(const smooth_axis_t *axis);
 #ifdef __cplusplus
 }
 #endif
+
+
+// -----------------------------------------------------------------------------
+// TODO (docs):
+// Add note about settle-time accuracy:
+//
+// - With clean input (no noise), smooth_axis reaches ~95% of target in
+//   settle_time_sec with typical error around ±4%.
+// - Under heavy noise, timing MAPE increases (~20–25%), but monotonicity
+//   and false-update protection remain perfect (0 false updates in tests).
+//
+// Emphasize in docs that the algorithm prioritizes stability and correctness
+// over exact settle-time matching when noise is present.
+// -----------------------------------------------------------------------------
+
+// TODO (tests/docs):
+// Add a clean step-response test:
+//   input: 100,100,...,100, 900,900,...,900 (fixed dt)
+// Use this to measure true EMA settle-time (95% of step).
+// Expect even lower MAPE (<4%) vs the current 1s ramp tests,
+// since the target is static after the jump and timing isn't
+// distorted by the ramp shape itself.
