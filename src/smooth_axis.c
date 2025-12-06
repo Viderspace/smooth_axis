@@ -30,16 +30,16 @@ static const float FALLBACK_DELTA_TIME        = 0.016f; // 16 ms
 
 // Compile-time switches for experimentation
 
-static const float CANONICAL_MAX = 1023.0f;
-static const float FULL_OFF_U    = 10.0f;
-static const float FULL_ON_U     = 1013.0f;
-static const float STICKY_U      = 3.0f;
-static const float MOVE_THRESH_U = 3.0f;
-
-static const float SMOOTH_AXIS_RESIDUAL = 0.05f;
-
-static const float BETA = 0.005f; // threshold sensitivity to noise fluctuations
-static const float K    = 3.5f; // Threshold headroom coefficient (1.0 = no headroom)
+static const float CANONICAL_MAX              = 1023.0f;
+static const float FULL_OFF_U                 = 0.0f;
+static const float FULL_ON_U                  = 1023.0f;
+static const float STICKY_U                   = 3.0f;
+static const float MOVE_THRESH_U              = 3.0f;
+static const float SMOOTH_AXIS_RESIDUAL       = 0.05f;
+static const float BETA                       =
+                           0.005f; // threshold sensitivity to noise fluctuations
+static const float K                          =
+                           3.5f; // Threshold headroom coefficient (1.0 = no headroom)
 //</editor-fold>
 
 //<editor-fold desc="static-Inline tiny helpers">
@@ -70,10 +70,11 @@ static inline float map_f(float x, float in_min, float in_max, float out_min, fl
 }
 
 static inline float compute_dyn_scale(float settle_time_sec) {
-    const float t_ref = 0.2f;
+    const float t_ref = 0.1f;
     float       ratio = settle_time_sec / t_ref;
     if (ratio < 1.0f) { ratio = 1.0f; }
-    return 1.0f / sqrtf(ratio);
+//    return 1.0f / sqrtf(ratio);
+    return 1.0f / ratio;
 }
 
 static inline float sign_of(const float residual) {
@@ -133,9 +134,8 @@ static float get_dynamic_thresh(const smooth_axis_t *axis) {
     const float base_thresh = axis->cfg.movement_thresh_norm;
     
     // Raw dynamic term driven only by _dev_norm
-    float dyn_thresh = K * axis->_dev_norm;
-    float scaled = dyn_thresh * axis->cfg._dyn_scale;
-    
+    float       dyn_thresh  = K * axis->_dev_norm;
+    float       scaled      = dyn_thresh * axis->cfg._dyn_scale;
     return clamp_f(scaled, 0.0f, 10.0f * base_thresh);
 }
 
@@ -168,6 +168,7 @@ static float get_normalized(const smooth_axis_t *axis) {
         return 0.0f;
     }
     float axis_position = axis->_smoothed_norm;
+//    return axis_position;
     return apply_sticky_margins(axis_position, axis->cfg.sticky_zone_norm);
 }
 //</editor-fold>
@@ -299,7 +300,6 @@ static void update_deviation(smooth_axis_t *axis, const float current_residual) 
 
 static void update_core(smooth_axis_t *axis, uint16_t raw_value, float alpha) {
     float norm = input_norm(axis, raw_value);
-    
     if (register_first_sample(axis, norm)) { return; }
     
     // 1. Calculate the deviation
@@ -419,6 +419,7 @@ uint16_t smooth_axis_get_u16(const smooth_axis_t *axis) {
     if (!axis) { return 0; }
     float max_out = (float)axis->cfg.max_raw;
     float n       = get_normalized(axis);
+    
     
     // Read about 'Zeno's Paradox' to understand the following 2 lines below
     if (n <= 1.0f / max_out) { return 0; }

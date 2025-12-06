@@ -175,7 +175,6 @@ uint16_t compute_base_raw(const scenario_t *sc, float t, int step_index) {
 void make_config_for_scenario(const scenario_t *sc,
                               smooth_axis_config_t *cfg) {
     if (!cfg || !sc) { return; }
-    
     const user_config_t *user = &sc->user;
     
     // We test the new "live-dt + settle_time" API only.
@@ -183,8 +182,8 @@ void make_config_for_scenario(const scenario_t *sc,
     smooth_axis_default_config_live_deltatime(cfg,
                                               user->max_raw,
                                               user->settle_time_sec);
-    cfg->full_off_norm = 0.0f;
-    cfg->full_on_norm  = 1.0f;
+//    cfg->full_off_norm = 0.0f;
+//    cfg->full_on_norm  = 1.0f;
 }
 
 void update_axis_for_scenario_dt(const scenario_t *sc,
