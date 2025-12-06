@@ -179,7 +179,7 @@ void smooth_axis_update_live_deltatime(smooth_axis_t *axis,
 float smooth_axis_get_norm(const smooth_axis_t *axis);
 
 // Map nominal value to [0 .. max_out] (e.g. joystick / LED range).
-uint16_t smooth_axis_get_u16(smooth_axis_t *axis);
+uint16_t smooth_axis_get_u16(const smooth_axis_t *axis);
 
 // Convenience: map back to cfg.max_raw.
 uint16_t smooth_axis_get_u16_full(const smooth_axis_t *axis);

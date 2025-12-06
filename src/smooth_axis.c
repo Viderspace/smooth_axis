@@ -1,13 +1,10 @@
-//
+// smooth_axis.c
 // Created by Jonatan Vider on 30/11/2025.
 //
-
-
-// smooth_axis.c
 #include "smooth_axis.h"
 #include <math.h>
 
-
+//<editor-fold desc="Constants & #defines">
 // ----------------------------------------------------------------------------
 // Compile-time Configuration (Overridable)
 // ----------------------------------------------------------------------------
@@ -34,8 +31,8 @@ static const float FALLBACK_DELTA_TIME        = 0.016f; // 16 ms
 // Compile-time switches for experimentation
 
 static const float CANONICAL_MAX = 1023.0f;
-static const float FULL_OFF_U    = 0.0f;
-static const float FULL_ON_U     = 1023.0f;
+static const float FULL_OFF_U    = 10.0f;
+static const float FULL_ON_U     = 1013.0f;
 static const float STICKY_U      = 3.0f;
 static const float MOVE_THRESH_U = 3.0f;
 
@@ -43,7 +40,9 @@ static const float SMOOTH_AXIS_RESIDUAL = 0.05f;
 
 static const float BETA = 0.005f; // threshold sensitivity to noise fluctuations
 static const float K    = 3.5f; // Threshold headroom coefficient (1.0 = no headroom)
+//</editor-fold>
 
+//<editor-fold desc="static-Inline tiny helpers">
 // ─────────────────────────────────────────────────────────────
 // Internal helpers
 // ─────────────────────────────────────────────────────────────
@@ -88,7 +87,9 @@ static inline bool sign_has_flipped(const float current, const float previous) {
     ///  the sign had flipped  || or completely static (zero noise edge case)
     return r_sign != last_sign || (r_sign == 0.0f && last_sign == 0.0f);
 }
+//</editor-fold>
 
+//<editor-fold desc="Input pipeline helpers (input_norm, set_default_config">
 // ─────────────────────────────────────────────────────────────
 // Config-level helpers
 // ─────────────────────────────────────────────────────────────
@@ -105,7 +106,7 @@ static void set_default_config(smooth_axis_config_t *cfg, uint16_t max_raw) {
 static float input_norm(const smooth_axis_t *axis, uint16_t raw_value) {
     uint16_t max_raw = axis->cfg.max_raw;
     
-    if (max_raw == 0) {
+    if (max_raw == 0) { /// zero division protection (should never)
         max_raw = 1;
     }
     
@@ -115,7 +116,7 @@ static float input_norm(const smooth_axis_t *axis, uint16_t raw_value) {
     float off = axis->cfg.full_off_norm;
     float on  = axis->cfg.full_on_norm;
     
-    if (on <= off) {
+    if (on <= off) { /// corner case for safety
         off = 0.0f;
         on  = 1.0f;
     }
@@ -124,22 +125,19 @@ static float input_norm(const smooth_axis_t *axis, uint16_t raw_value) {
     norm = map_f(norm, off, on, 0.0f, 1.0f);
     return norm;
 }
+//</editor-fold>
+
+//<editor-fold desc="Output Pipeline helpers">
 
 static float get_dynamic_thresh(const smooth_axis_t *axis) {
     const float base_thresh = axis->cfg.movement_thresh_norm;
     
     // Raw dynamic term driven only by _dev_norm
-    const float dyn_thresh = K * axis->_dev_norm;
-    
-    
-    
-    // 1. Calculate the standard "Stable" threshold
+    float dyn_thresh = K * axis->_dev_norm;
     float scaled = dyn_thresh * axis->cfg._dyn_scale;
     
-    // Clamp relative to base threshold as before
-    return clamp_f(scaled, 0.0, 10.0f * base_thresh);
+    return clamp_f(scaled, 0.0f, 10.0f * base_thresh);
 }
-
 
 // ---------------------------------------------------------------------------
 // 2) Sticky / nominal helpers
@@ -159,8 +157,9 @@ static float apply_sticky_margins(float axis_position, float sticky_margin_size)
     float sticky_floor   = sticky_margin_size;
     if (axis_position >= sticky_ceiling) { return 1.0f; }
     if (axis_position <= sticky_floor) { return 0.0f; }
-    return map_f(axis_position, sticky_floor, sticky_ceiling, 0.0f, 1.0f);
-    
+    axis_position =
+            map_f(axis_position, 0.0f, 1.0f, -sticky_margin_size, 1.0f + sticky_margin_size);
+    return clamp_f_0_1(axis_position);
 }
 
 static float get_normalized(const smooth_axis_t *axis) {
@@ -171,7 +170,9 @@ static float get_normalized(const smooth_axis_t *axis) {
     float axis_position = axis->_smoothed_norm;
     return apply_sticky_margins(axis_position, axis->cfg.sticky_zone_norm);
 }
+//</editor-fold>
 
+//<editor-fold desc="EMA Math/Logic">
 // -----------------------------------------------------------------------------
 // 3) EMA + AUTO helpers
 // -----------------------------------------------------------------------------
@@ -202,7 +203,9 @@ static float ema_alpha_from_dt(const float k, const float dt_sec) {
     }
     return 1.0f; // no smoothing fallback
 }
+//</editor-fold>
 
+//<editor-fold desc="Error Handling |     todo - Apply across the board">
 #ifndef NDEBUG
 
 #include <stdio.h>
@@ -214,6 +217,12 @@ static void handle_missing_time_source(void) {
 }
 
 #endif
+//</editor-fold>
+
+//<editor-fold desc="Warmup (AUTO) / First sample setter">
+
+
+
 
 static bool auto_warmup_has_finished(const smooth_axis_t *axis) {
     return axis->_warmup_cycles_done >= SMOOTH_AXIS_INIT_CALIBRATION_CYCLES;
@@ -255,23 +264,17 @@ static void auto_run_warmup_cycle_if_needed(smooth_axis_t *axis) {
     }
 }
 
-// -----------------------------------------------------------------------------
-// Helper 1: Post calibrating the dynamic threshold based on settle_time_sec
-// -----------------------------------------------------------------------------
-static float apply_settle_time_scaling(const smooth_axis_t *axis,
-                                       float dyn_term,
-                                       float base_thresh) {
-    // We're actually saying:
-    // From about 200 ms of settle_time and beyond
-    // -> The core EMA is stable enough on its own
-    // -> We down need this extra threshold as much
-    // -> We will tame it down proportionally to settle_time duration
-    
-    float scaled = dyn_term * axis->cfg._dyn_scale;
-    // Clamp relative to base threshold as before
-    return clamp_f(scaled, base_thresh, 10.0f * base_thresh);
+static bool register_first_sample(smooth_axis_t *axis, float norm) {
+    if (!axis->_has_first_sample) {
+        axis->_smoothed_norm    = norm;
+        axis->_has_first_sample = true;
+        return true; // handled; caller should return
+    }
+    return false;    // already initialized; continue with EMA
 }
+//</editor-fold>
 
+//<editor-fold desc="Update helpers">
 static void update_deviation(smooth_axis_t *axis, const float current_residual) {
     /* About 'sign flip' :
  * True movement (often) has consecutive residuals from the same sign
@@ -292,15 +295,6 @@ static void update_deviation(smooth_axis_t *axis, const float current_residual) 
     float new_sample = zero_crossed ? abs_f(current_residual) : 0.0f;
     float dev        = ema(axis->_dev_norm, new_sample, BETA);
     axis->_dev_norm = clamp_f_0_1(dev);
-}
-
-static bool register_first_sample(smooth_axis_t *axis, float norm) {
-    if (!axis->_has_first_sample) {
-        axis->_smoothed_norm    = norm;
-        axis->_has_first_sample = true;
-        return true; // handled; caller should return
-    }
-    return false;    // already initialized; continue with EMA
 }
 
 static void update_core(smooth_axis_t *axis, uint16_t raw_value, float alpha) {
@@ -327,11 +321,14 @@ static void update_core(smooth_axis_t *axis, uint16_t raw_value, float alpha) {
      * update_deviation_norm_with_sign_flip(axis, norm);
      */
 }
+//</editor-fold>
 
+//<editor-fold desc="Public API">
 // ─────────────────────────────────────────────────────────────
 // Public API
 // ─────────────────────────────────────────────────────────────
 
+//<editor-fold desc="Init & Configs">
 void smooth_axis_default_config_auto(smooth_axis_config_t *cfg,
                                      uint16_t max_raw,
                                      float settle_time_sec,
@@ -381,7 +378,9 @@ void smooth_axis_init(smooth_axis_t *axis, const smooth_axis_config_t *cfg) {
     axis->_has_first_sample   = false;
     
 }
+//</editor-fold>
 
+//<editor-fold desc="Update APIs">
 // -----------------------------------------------------------------------------
 // 4) Core update
 // -----------------------------------------------------------------------------
@@ -405,7 +404,9 @@ void smooth_axis_update_live_deltatime(smooth_axis_t *axis, uint16_t raw_value, 
     float live_alpha = ema_alpha_from_dt(axis->cfg._ema_rate, dt_sec);
     update_core(axis, raw_value, live_alpha);
 }
+//</editor-fold>
 
+//<editor-fold desc="Query methods">
 // -----------------------------------------------------------------------------
 // 5) Output + change detection
 // -----------------------------------------------------------------------------
@@ -416,25 +417,24 @@ float smooth_axis_get_norm(const smooth_axis_t *axis) {
 
 uint16_t smooth_axis_get_u16(const smooth_axis_t *axis) {
     if (!axis) { return 0; }
-    uint16_t max_out = axis->cfg.max_raw;
-    float    n       = get_normalized(axis);
+    float max_out = (float)axis->cfg.max_raw;
+    float n       = get_normalized(axis);
     
-    // clear edges are treated simple
-    if (n <= 0.0f) { return 0; }
-    if (n >= 1.0f) { return max_out; }
-    return (uint16_t)(n * (float)max_out + 0.5f);
+    // Read about 'Zeno's Paradox' to understand the following 2 lines below
+    if (n <= 1.0f / max_out) { return 0; }
+    if (n >= (max_out - 1.0) / max_out) { return axis->cfg.max_raw; }
+    
+    return (uint16_t)lroundf(n * (float)max_out);
 }
 
 bool smooth_axis_has_new_value(smooth_axis_t *axis) {
-    if (!axis || !axis->_has_first_sample) {
+    if (!axis || !axis->_has_first_sample) { /// Protecting misuse
         return false;
     }
     
     float current = get_normalized(axis);
     float last    = axis->_last_reported_norm;
     float diff    = abs_f(current - last);
-    
-    
     
     // If the change is smaller than one quantization step in norm space,
     // it cannot change the integer output → ignore.
@@ -445,13 +445,14 @@ bool smooth_axis_has_new_value(smooth_axis_t *axis) {
         return false;
     }
     
-    // todo - consider the reuse of full_off/on here conceptually
-    bool force_edge = (current < axis->cfg.full_off_norm)
-                      || (current > axis->cfg.full_on_norm);
-    
+    // When approaching to the edges, we treat each movement (>= epsilon) as 'Always Important'
+    float sticky_ceil            = 1-axis->cfg.sticky_zone_norm;
+    float sticky_floor           = axis->cfg.sticky_zone_norm;
+    bool inside_the_sticky_edges = (current < sticky_floor) || (current > sticky_ceil);
+
     float dyn_thresh = get_dynamic_thresh(axis);
     
-    if (force_edge || diff > dyn_thresh) {
+    if (inside_the_sticky_edges || diff > dyn_thresh) {
         axis->_last_reported_norm = current;
         return true;
     }
@@ -459,6 +460,8 @@ bool smooth_axis_has_new_value(smooth_axis_t *axis) {
     return false;
 }
 
+
+//<editor-fold desc="Noise / Threshold getters">
 // -----------------------------------------------------------------------------
 // Introspection / diagnostics
 // -----------------------------------------------------------------------------
@@ -480,8 +483,12 @@ uint16_t smooth_axis_get_effective_thresh_u(const smooth_axis_t *axis) {
         return 0;
     }
     float val = t_norm * (float)axis->cfg.max_raw + 0.5f;
-    val = clamp_f(val, 0.0f, 65535.0f);
-    
+    val = clamp_f(val, 0.0f, (float)axis->cfg.max_raw);
     return (uint16_t)val;
 }
+//</editor-fold>
+
+//</editor-fold>
+
+//</editor-fold>
 
