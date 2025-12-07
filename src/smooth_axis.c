@@ -1,56 +1,54 @@
-// smooth_axis.c
-// Created by Jonatan Vider on 30/11/2025.
-//
+/**
+ * @file smooth_axis.c
+ * @brief Implementation of adaptive sensor smoothing
+ * @author Jonatan Vider
+ * @date 30/11/2025
+ *
+ * See smooth_axis.h for API documentation.
+ */
+
 #include "smooth_axis.h"
 #include "smooth_axis_debug.h"
 #include <math.h>
 
-
-//<editor-fold desc="Constants & #defines">
-// ----------------------------------------------------------------------------
-// Compile-time Configuration (Overridable)
-// ----------------------------------------------------------------------------
-#ifndef SMOOTH_AXIS_INIT_CALIBRATION_CYCLES
-#define SMOOTH_AXIS_INIT_CALIBRATION_CYCLES 4096
-#endif
-
 // -----------------------------------------------------------------------------
 // Internal Constants
 // -----------------------------------------------------------------------------
+static const uint16_t SMOOTH_AXIS_INIT_CALIBRATION_CYCLES = 4096;
 
-// Internal clamps for AUTO warm-up
-static const float SMOOTH_AXIS_AUTO_DT_MIN_MS = 0.1f;
-static const float SMOOTH_AXIS_AUTO_DT_MAX_MS = 50.0f;
-static const float FALLBACK_DELTA_TIME        = 0.016f; // 16 ms
+// Clamp measured dt during AUTO warmup to avoid pathological cases
+static const float SMOOTH_AXIS_AUTO_DT_MIN_MS = 0.1f;   // 10,000 Hz max
+static const float SMOOTH_AXIS_AUTO_DT_MAX_MS = 50.0f;  // 20 Hz min
+static const float FALLBACK_DELTA_TIME        = 0.016f; // 60 Hz assumption before warmup
 
-// -----------------------------------------------------------------------------
-// Default "feel" parameters
-// -----------------------------------------------------------------------------
-//
-// If you want to change the global feel of all axes, this is the place.
-//
 
-// Compile-time switches for experimentation
 
-static const float CANONICAL_MAX              = 1023.0f;
-static const float FULL_OFF_U                 = 0.0f;
-static const float FULL_ON_U                  = 1023.0f;
-static const float STICKY_U                   = 3.0f;
-static const float MOVE_THRESH_U              = 3.0f;
-static const float EMA_CONVERGENCE_THRESHOLD  = 0.05f;
-static const float NOISE_SMOOTHING_RATE       =
-                           0.005f; // threshold sensitivity to noise fluctuations
-static const float THRESHOLD_NOISE_MULTIPLIER =
-                           3.5f; // Threshold headroom coefficient (1.0 = no headroom)
+// ----------------------------------------------------------------------------
+// Default "Feel" Parameters (normalized to 1023 ADC range)
+// ----------------------------------------------------------------------------
 
-#define MAX_STICKY_ZONE 0.49f
+static const float CANONICAL_MAX = 1023.0f;
+static const float FULL_OFF_U    = 0.0f;    // No dead zone by default
+static const float FULL_ON_U     = 1023.0f; // No dead zone by default
+static const float STICKY_U      = 3.0f;    // ~0.3% magnetic zone
+static const float MOVE_THRESH_U = 3.0f;    // ~0.3% base threshold
 
-//</editor-fold>
+// EMA convergence: 5% remaining error = "settled"
+static const float EMA_CONVERGENCE_THRESHOLD = 0.05f;
 
-//<editor-fold desc="static-Inline tiny helpers">
-// ─────────────────────────────────────────────────────────────
-// Internal helpers
-// ─────────────────────────────────────────────────────────────
+// Noise estimation: slow EMA for stable noise floor tracking
+static const float NOISE_SMOOTHING_RATE = 0.005f;
+
+// Dynamic threshold headroom: threshold = 3.5x noise estimate
+static const float THRESHOLD_NOISE_MULTIPLIER = 3.5f;
+
+static const float MAX_STICKY_ZONE = 0.49f; //Prevent floor/ceiling overlap (0.5 would be ambiguous)
+
+
+// ============================================================================
+// Inline Math Utilities
+// ============================================================================
+
 static inline float clamp_f(float x, float lo, float hi) {
     return x < lo ? lo : (x > hi ? hi : x);
 }
@@ -59,46 +57,50 @@ static inline float clamp_f_0_1(float x) {
     return clamp_f(x, 0.0f, 1.0f);
 }
 
-static inline float abs_f(float x) { return x < 0.0f ? -x : x; }
+static inline float abs_f(float x) {
+    return x < 0.0f ? -x : x;
+}
 
+// Exponential Moving Average: out = (1-α)·old + α·new
 static inline float ema(float old, float new, float alpha) {
     return (1.0f - alpha) * old + alpha * new;
 }
 
+// Linear interpolation: map x from [in_min, in_max] to [out_min, out_max]
 static inline float map_f(float x, float in_min, float in_max, float out_min, float out_max) {
     if (in_max == in_min) {
-        return out_min;  // avoid div by zero; degenerate case
+        return out_min;  // Degenerate case: avoid division by zero
     }
     float t = (x - in_min) / (in_max - in_min);
     return out_min + t * (out_max - out_min);
 }
 
+// Scale the threshold inversely with settle_time (longer settle times allows lower threshold)
 static inline float compute_dyn_scale(float settle_time_sec) {
-    const float t_ref = 0.1f;
+    const float t_ref = 0.1f;  // Reference settle time (100ms)
     float       ratio = settle_time_sec / t_ref;
     if (ratio < 1.0f) { ratio = 1.0f; }
-//    return 1.0f / sqrtf(ratio);
-    return 1.0f / ratio;
+    return 1.0f / ratio;  // Linear inverse scaling
 }
 
 static inline float sign_of(const float residual) {
     return (residual > 0.0f) ? 1.0f : (residual < 0.0f) ? -1.0f : 0.0f;
 }
 
+// Noise detection heuristic: true movement has consistent sign, noise flips randomly
 static inline bool has_sign_flipped(const float current, const float previous) {
     float r_sign    = sign_of(current);
     float last_sign = sign_of(previous);
-    
-    ///  the sign had flipped  || or completely static (zero noise edge case)
     return r_sign != last_sign || (r_sign == 0.0f && last_sign == 0.0f);
 }
-//</editor-fold>
 
-//<editor-fold desc="Input pipeline helpers (input_norm, set_default_config">
-// ─────────────────────────────────────────────────────────────
-// Config-level helpers
-// ─────────────────────────────────────────────────────────────
 
+// ============================================================================
+// Input Pipeline Helpers
+// ============================================================================
+
+
+// Apply library defaults from canonical constants (normalized to user's max_raw)
 static void set_default_config(smooth_axis_config_t *cfg, uint16_t max_raw) {
     cfg->max_raw              = max_raw ? max_raw : 1;
     cfg->full_off_norm        = clamp_f_0_1(FULL_OFF_U / CANONICAL_MAX);
@@ -107,96 +109,81 @@ static void set_default_config(smooth_axis_config_t *cfg, uint16_t max_raw) {
     cfg->movement_thresh_norm = clamp_f_0_1(MOVE_THRESH_U / CANONICAL_MAX);
 }
 
-// Normalize raw input and apply full_off/full_on clipping + re-lerp to [0..1]
+// Normalize raw ADC [0..max_raw] to [0..1], with full_off/full_on dead zone clipping
 static float input_norm(const smooth_axis_t *axis, uint16_t raw_value) {
     uint16_t max_raw = axis->cfg.max_raw;
-    if (max_raw == 0) { /// zero division protection (should never)
-        max_raw = 1;
-    }
+    if (max_raw == 0) { max_raw = 1; }  // Safety: avoid division by zero
+    
     float norm = (float)raw_value / (float)max_raw;
     norm = clamp_f_0_1(norm);
+    
     float off = axis->cfg.full_off_norm;
     float on  = axis->cfg.full_on_norm;
-    if (on <= off) { /// corner case for safety
+    if (on <= off) {  // Degenerate config: treat as full range
         off = 0.0f;
         on  = 1.0f;
     }
-    norm      = clamp_f(norm, off, on);
-    norm      = map_f(norm, off, on, 0.0f, 1.0f);
+    
+    // Clip to dead zones, then re-stretch to [0..1]
+    norm = clamp_f(norm, off, on);
+    norm = map_f(norm, off, on, 0.0f, 1.0f);
     return norm;
 }
-//</editor-fold>
 
-//<editor-fold desc="Output Pipeline helpers">
 
-/*
- * Internal helper of 'has_new_value()' API method
- */
+
+// ============================================================================
+// Output Pipeline Helpers
+// ============================================================================
+
+// True if normalized delta exceeds 1 LSB in integer output (prevents sub-quantum updates)
 static bool would_change_output(const smooth_axis_t *axis, float diff) {
-    // If the change is smaller than one quantization step in norm space,
-    // it cannot change the integer output → ignore.
     float max_raw = axis->cfg.max_raw ? (float)axis->cfg.max_raw : 1.0f;
-    float epsilon = 1.0f / max_raw;
-    
+    float epsilon = 1.0f / max_raw;  // One LSB in normalized space
     return diff > epsilon;
 }
 
-static float get_dynamic_thresh(const smooth_axis_t *axis) {
+// Dynamic threshold: scales with noise level, clamped to [1x .. 10x] of base threshold
+static float get_dynamic_threshold(const smooth_axis_t *axis) {
     const float base_thresh = axis->cfg.movement_thresh_norm;
     
-    // Raw dynamic term driven only by _noise_estimate_norm
     float dyn_thresh = THRESHOLD_NOISE_MULTIPLIER * axis->_noise_estimate_norm;
     float scaled     = dyn_thresh * axis->cfg._settle_time_scaler;
     return clamp_f(scaled, 0.0f, 10.0f * base_thresh);
 }
 
-// ---------------------------------------------------------------------------
-// 2) Sticky / nominal helpers
-// ---------------------------------------------------------------------------
-
-
-// Sticky endpoints + re-lerp the middle part:
-//   - 0..sticky_zone_norm      → hard 0
-//   - 1-sticky_zone_norm..1    → hard 1
-//   - [sticky .. 1-sticky]     → re-lin-mapped back to [0..1]
+// Apply sticky zones: endpoints snap to exact 0.0/1.0, middle region re-stretched to [0..1]
 static float apply_sticky_margins(float axis_position, float sticky_margin_size) {
-    
-    /// why 0.49 ?  above >= 0.50 -> the floor and ceiling overlapping
     sticky_margin_size = clamp_f(sticky_margin_size, 0.0f, MAX_STICKY_ZONE);
-    float sticky_ceiling = 1.0f - sticky_margin_size;
+    
     float sticky_floor   = sticky_margin_size;
-    if (axis_position >= sticky_ceiling) { return 1.0f; }
+    float sticky_ceiling = 1.0f - sticky_margin_size;
+    
+    // Snap to endpoints if inside sticky zones
     if (axis_position <= sticky_floor) { return 0.0f; }
+    if (axis_position >= sticky_ceiling) { return 1.0f; }
+    
+    // Re-stretch middle region to fill [0..1]
     axis_position =
             map_f(axis_position, 0.0f, 1.0f, -sticky_margin_size, 1.0f + sticky_margin_size);
     return clamp_f_0_1(axis_position);
 }
 
+// Get nominal output after smoothing + sticky zone processing
 static float get_normalized(const smooth_axis_t *axis) {
     if (!axis || !axis->_has_first_sample) {
         return 0.0f;
     }
-    float axis_position = axis->_smoothed_norm;
-//    return axis_position;
-    return apply_sticky_margins(axis_position, axis->cfg.sticky_zone_norm);
+    return apply_sticky_margins(axis->_smoothed_norm, axis->cfg.sticky_zone_norm);
 }
-//</editor-fold>
 
-//<editor-fold desc="EMA Math/Logic">
-// -----------------------------------------------------------------------------
-// 3) EMA + AUTO helpers
-// -----------------------------------------------------------------------------
-/*
- * Key behaviour - This calculation only happens once (in both modes)
- *
- *  We calculate 'ema_rate' so that after settle_time_sec,
- *  the remaining distance to the target is reduced to 5% (EMA_CONVERGENCE_THRESHOLD).
 
- * The math behind:
- * Given a 'settle_time' which was selected by the user,
- * compute 'ema_rate' such that:
- * alpha(dt) = 1 - exp(ema_rate * dt) , s.t.  ema_rate = ln(EMA_CONVERGENCE_THRESHOLD) / settle_time
- */
+// ============================================================================
+// EMA Math
+// ============================================================================
+
+// Compute decay rate k such that: after settle_time_sec, error reduces to 5%
+// Formula: k = ln(0.05) / settle_time  →  alpha(dt) = 1 - exp(k·dt)
 static float compute_ema_decay_rate(const float settle_time_sec) {
     if (settle_time_sec <= 0.0f) {
         return 0.0f;
@@ -206,49 +193,51 @@ static float compute_ema_decay_rate(const float settle_time_sec) {
     return ln_r / settle_time_sec;
 }
 
-static float ema_alpha_from_live_dt(const float k, const float dt_sec) {
+// Convert decay rate k and time step dt into EMA alpha
+// alpha = 1 - exp(k·dt), clamped for numerical stability
+static float get_alpha_from_dt(const float k, const float dt_sec) {
     if (dt_sec > 0.0f && k != 0.0f) {
-        float ratio = clamp_f(k * dt_sec, -20.0f, 0.0f);
+        float ratio = clamp_f(k * dt_sec, -20.0f, 0.0f);  // Prevent overflow
         return 1.0f - expf(ratio);
     }
-    return 1.0f; // no smoothing fallback
+    return 1.0f;  // Fallback: instant response (no smoothing)
 }
-//</editor-fold>
 
-
-//<editor-fold desc="Warmup (AUTO) / First sample setter">
-
-
-
+// ============================================================================
+// Warmup (AUTO_DT Mode)
+// ============================================================================
 
 static bool is_warmup_finished(const smooth_axis_t *axis) {
     return axis->_warmup_cycles_done >= SMOOTH_AXIS_INIT_CALIBRATION_CYCLES;
 }
 
-// AUTO warm-up: measure frame dt, accumulate average, then derive _auto_alpha.
+// Measure average dt over 4096 samples, then compute fixed alpha (AUTO_DT only)
 static void auto_run_warmup_cycle_if_needed(smooth_axis_t *axis) {
-    // Already calibrated - do nothing
-    // Already calibrated - do nothing
     if (is_warmup_finished(axis)) { return; }
     
     SMOOTH_AXIS_CHECK_RETURN(axis->cfg.now_ms != NULL, "AUTO mode requires now_ms function");
     
     uint32_t now_ms = axis->cfg.now_ms();
     if (axis->_last_time_ms == 0) {
-        axis->_last_time_ms = now_ms;
+        axis->_last_time_ms = now_ms;  // First call: just record timestamp
         return;
     }
+    
+    // Measure dt and accumulate
     float dt_ms = (float)(now_ms - axis->_last_time_ms);
     axis->_last_time_ms = now_ms;
     dt_ms = clamp_f(dt_ms, SMOOTH_AXIS_AUTO_DT_MIN_MS, SMOOTH_AXIS_AUTO_DT_MAX_MS);
+    
     float dt_sec = dt_ms / 1000.0f;
     axis->_dt_accum_sec += dt_sec;
     axis->_warmup_cycles_done++;
     
-    // axis on auto mode should enter this block exactly once
+    
+    // Warmup complete: compute fixed alpha from average dt
     if (is_warmup_finished(axis)) {
         float dt_avg = axis->_dt_accum_sec / (float)axis->_warmup_cycles_done;
-        axis->_auto_alpha = ema_alpha_from_live_dt(axis->cfg._ema_decay_rate, dt_avg);
+        axis->_auto_alpha = get_alpha_from_dt(axis->cfg._ema_decay_rate, dt_avg);
+        
         SMOOTH_DEBUGF("warmup complete: cycles=%u dt_avg=%.2fms alpha=%.4f",
                       axis->_warmup_cycles_done,
                       dt_avg * 1000.0f,
@@ -256,46 +245,40 @@ static void auto_run_warmup_cycle_if_needed(smooth_axis_t *axis) {
     }
 }
 
+// Set initial smoothed value from first raw sample (skip EMA on frame 0)
 static bool initialize_on_first_sample(smooth_axis_t *axis, float norm) {
-    if (axis->_has_first_sample) { return false; }  // already initialized; continue with EMA
+    if (axis->_has_first_sample) {
+        return false;  // Already initialized
+    }
     
     axis->_has_first_sample = true;
     axis->_smoothed_norm    = norm;
-    axis->t_1               = norm;
-    axis->t_2               = norm;
     
     SMOOTH_DEBUGF("first sample: norm=%.3f", norm);
     return true;
 }
-//</editor-fold>
 
-//<editor-fold desc="Update helpers">
+
+// ============================================================================
+// Core Update Logic
+// ============================================================================
+
+// Track noise level via sign-flip detection: noise oscillates around signal, movement is directional
 static void update_noise_estimate(smooth_axis_t *axis, const float current_residual) {
-    /* About 'sign flip' :
- * True movement (often) has consecutive residuals from the same sign
- * ===============
- * _____----▔▔▔▔
- * ==============
- * Noise without movement however, tends to fluctuate randomly above and below the signal
- * ==============
- * _-▔-_---_▔--_-
- * ==============
- * We only care about noise, and want to estimate it only when no true-movement
- * So if the sign flipped -> its noise -> update the noise level
- * Otherwise -> its a movement -> decrease the noise level  */
     bool is_noise_sample = has_sign_flipped(current_residual, axis->_last_residual);
-    
     axis->_last_residual = current_residual;
     
+    // Sign flip → likely noise, update estimate. No flip → likely movement, decay estimate.
     float new_sample = is_noise_sample ? abs_f(current_residual) : 0.0f;
     
     float old_noise = axis->_noise_estimate_norm;
     
-    float dev = ema(axis->_noise_estimate_norm, new_sample, NOISE_SMOOTHING_RATE);
-    axis->_noise_estimate_norm = clamp_f_0_1(dev);
+    axis->_noise_estimate_norm = ema(axis->_noise_estimate_norm, new_sample, NOISE_SMOOTHING_RATE);
+    axis->_noise_estimate_norm = clamp_f_0_1(axis->_noise_estimate_norm);
     
+    // Debug: log significant noise changes
     float noise_change = abs_f(axis->_noise_estimate_norm - old_noise);
-    if (noise_change > 0.01f) {  // More than 1% change
+    if (noise_change > 0.01f) {
         SMOOTH_DEBUGF("noise: %.4f -> %.4f %s",
                       old_noise,
                       axis->_noise_estimate_norm,
@@ -303,37 +286,30 @@ static void update_noise_estimate(smooth_axis_t *axis, const float current_resid
     }
 }
 
+// Apply EMA smoothing + update noise estimate
 static void update_core(smooth_axis_t *axis, uint16_t raw_value, float alpha) {
     float norm = input_norm(axis, raw_value);
     if (initialize_on_first_sample(axis, norm)) { return; }
     
-    // 1. Calculate the deviation
     float diff = norm - axis->_smoothed_norm;
     
-    // 2. Update EMA
-    axis->_smoothed_norm += alpha * diff;
+    axis->_smoothed_norm += alpha * diff; // EMA: x += α·(target - x)
     
-    // 3. Update Noise (Exact same logic as your original)
     update_noise_estimate(axis, diff);
     
     /*
-     * TODO - Note that the upper implementation change (corrected) noise logic a bit.
-     * We used to calculate our diff (inside update_noise) with our smoothed_norm already updated
-     * Now our diff is from smoothed_norm which is pre-updated
-     *
+     * Note - the upper implementation changed (corrected) noise logic a bit.
      * original:
      * axis->_smoothed_norm = ema(axis->_smoothed_norm, norm, alpha);
      * update_deviation_norm_with_sign_flip(axis, norm);
      */
 }
-//</editor-fold>
 
-//<editor-fold desc="Public API">
-// ─────────────────────────────────────────────────────────────
-// Public API
-// ─────────────────────────────────────────────────────────────
 
-//<editor-fold desc="Init & Configs">
+// ============================================================================
+// Public API - Configuration
+// ============================================================================
+
 void smooth_axis_default_config_auto_dt(smooth_axis_config_t *cfg,
                                         uint16_t max_raw,
                                         float settle_time_sec,
@@ -342,13 +318,11 @@ void smooth_axis_default_config_auto_dt(smooth_axis_config_t *cfg,
     SMOOTH_AXIS_CHECK_RETURN(now_ms != NULL, "AUTO mode requires now_ms function");
     
     set_default_config(cfg, max_raw);
-    cfg->mode            = SMOOTH_AXIS_MODE_AUTO_DT;
-    cfg->settle_time_sec = settle_time_sec;
-    cfg->now_ms          = now_ms;
-    
-    // NEW: AUTO also has a valid settle_k, so it can use ema_alpha_from_live_dt
+    cfg->mode                = SMOOTH_AXIS_MODE_AUTO_DT;
+    cfg->settle_time_sec     = settle_time_sec;
+    cfg->now_ms              = now_ms;
     cfg->_ema_decay_rate     = compute_ema_decay_rate(settle_time_sec);
-    cfg->_settle_time_scaler = compute_dyn_scale(settle_time_sec); // Calculate once
+    cfg->_settle_time_scaler = compute_dyn_scale(settle_time_sec);
 }
 
 void smooth_axis_default_config_live_dt(smooth_axis_config_t *cfg,
@@ -360,7 +334,7 @@ void smooth_axis_default_config_live_dt(smooth_axis_config_t *cfg,
     cfg->mode                = SMOOTH_AXIS_MODE_LIVE_DT;
     cfg->settle_time_sec     = settle_time_sec;
     cfg->_ema_decay_rate     = compute_ema_decay_rate(settle_time_sec);
-    cfg->_settle_time_scaler = compute_dyn_scale(settle_time_sec); // Calculate once
+    cfg->_settle_time_scaler = compute_dyn_scale(settle_time_sec);
 }
 
 void smooth_axis_init(smooth_axis_t *axis, const smooth_axis_config_t *cfg) {
@@ -371,15 +345,14 @@ void smooth_axis_init(smooth_axis_t *axis, const smooth_axis_config_t *cfg) {
     
     axis->cfg                  = *cfg;
     axis->_smoothed_norm       = 0.0f;
-    axis->_noise_estimate_norm = 0.01f;
+    axis->_noise_estimate_norm = 0.01f;  // Initial noise floor estimate
     axis->_last_reported_norm  = 0.0f;
-    /// temporary alpha (default based on a FALLBACK_DELTA_TIME fixed update until warmup's done)
-    axis->_auto_alpha          = ema_alpha_from_live_dt(cfg->_ema_decay_rate, FALLBACK_DELTA_TIME);
+    // 60 Hz assumption until warmup
+    axis->_auto_alpha          = get_alpha_from_dt(cfg->_ema_decay_rate, FALLBACK_DELTA_TIME);
     axis->_dt_accum_sec        = 0.0f;
     axis->_warmup_cycles_done  = 0;
     axis->_last_time_ms        = 0;
     axis->_last_residual       = 0.0f;
-    /// first loop iteration will flag this true
     axis->_has_first_sample    = false;
     
     SMOOTH_DEBUGF("init: mode=%s max_raw=%u settle_time=%.3fs",
@@ -387,13 +360,11 @@ void smooth_axis_init(smooth_axis_t *axis, const smooth_axis_config_t *cfg) {
                   cfg->max_raw,
                   cfg->settle_time_sec);
 }
-//</editor-fold>
 
-//<editor-fold desc="Update APIs">
-// -----------------------------------------------------------------------------
-// 4) Core update
-// -----------------------------------------------------------------------------
-// TODO(jonatan): assert in debug if mode mismatch (AUTO vs LIVE_DT)
+
+// ============================================================================
+// Public API - Update
+// ============================================================================
 
 void smooth_axis_update_auto_dt(smooth_axis_t *axis, uint16_t raw_value) {
     SMOOTH_AXIS_CHECK_RETURN(axis != NULL, "axis is NULL");
@@ -402,8 +373,7 @@ void smooth_axis_update_auto_dt(smooth_axis_t *axis, uint16_t raw_value) {
     
     auto_run_warmup_cycle_if_needed(axis);
     
-    /// In auto mode, once the alpha was calculated once - we use it as a constant
-    update_core(axis, raw_value, axis->_auto_alpha);
+    update_core(axis, raw_value, axis->_auto_alpha);  // Fixed alpha after warmup
 }
 
 void smooth_axis_update_live_dt(smooth_axis_t *axis, uint16_t raw_value, float dt_sec) {
@@ -411,16 +381,14 @@ void smooth_axis_update_live_dt(smooth_axis_t *axis, uint16_t raw_value, float d
     SMOOTH_AXIS_CHECK_RETURN(axis->cfg.mode == SMOOTH_AXIS_MODE_LIVE_DT,
                              "wrong mode: use update_auto_dt() for AUTO_DT mode");
     
-    /// In live dt mode, we calibrate alpha according to the new dt in each update
-    float live_alpha = ema_alpha_from_live_dt(axis->cfg._ema_decay_rate, dt_sec);
+    float live_alpha = get_alpha_from_dt(axis->cfg._ema_decay_rate,
+                                         dt_sec); // Recompute alpha each frame
     update_core(axis, raw_value, live_alpha);
 }
-//</editor-fold>
 
-//<editor-fold desc="Query methods">
-// -----------------------------------------------------------------------------
-// 5) Output + change detection
-// -----------------------------------------------------------------------------
+// ============================================================================
+// Public API - Output & Query
+// ============================================================================
 
 float smooth_axis_get_norm(const smooth_axis_t *axis) {
     return get_normalized(axis);
@@ -428,13 +396,14 @@ float smooth_axis_get_norm(const smooth_axis_t *axis) {
 
 uint16_t smooth_axis_get_u16(const smooth_axis_t *axis) {
     if (!axis) { return 0; }
+    
     float max_out = (float)axis->cfg.max_raw;
     float n       = get_normalized(axis);
     
-    
-    // Read about 'Zeno's Paradox' to understand the following 2 lines below
+    // Ensure exact 0 and max_raw at endpoints (prevent off-by-one from floating point rounding)
     if (n <= 1.0f / max_out) { return 0; }
     if (n >= (max_out - 1.0) / max_out) { return axis->cfg.max_raw; }
+    
     return (uint16_t)lroundf(n * (float)max_out);
 }
 
@@ -452,9 +421,11 @@ bool smooth_axis_has_new_value(smooth_axis_t *axis) {
     float sticky_floor  = axis->cfg.sticky_zone_norm;
     bool in_sticky_zone = (current < sticky_floor) || (current > sticky_ceil);
     
-    float dyn_thresh = get_dynamic_thresh(axis);
-    if (in_sticky_zone || diff > dyn_thresh) {
+    float dynamic_threshold = get_dynamic_threshold(axis);  // Scales 1x-10x with noise
+    
+    if (in_sticky_zone || diff > dynamic_threshold) {
         axis->_last_reported_norm = current;
+        
         SMOOTH_DEBUGF("new value: %.3f (diff=%.4f thresh=%.4f %s)",
                       current,
                       diff,
@@ -465,35 +436,27 @@ bool smooth_axis_has_new_value(smooth_axis_t *axis) {
     return false;
 }
 
-
-//<editor-fold desc="Noise / Threshold getters">
-// -----------------------------------------------------------------------------
-// Introspection / diagnostics
-// -----------------------------------------------------------------------------
+// ============================================================================
+// Public API - Introspection / diagnostics
+// ============================================================================
 
 float smooth_axis_get_noise_norm(const smooth_axis_t *axis) {
     return axis ? axis->_noise_estimate_norm : 0.0f;
 }
 
 float smooth_axis_get_effective_thresh_norm(const smooth_axis_t *axis) {
-    return axis ? get_dynamic_thresh(axis) : 0.0f;
+    return axis ? get_dynamic_threshold(axis) : 0.0f;
 }
 
 uint16_t smooth_axis_get_effective_thresh_u16(const smooth_axis_t *axis) {
     if (!axis || axis->cfg.max_raw == 0) {
         return 0;
     }
-    float t_norm = get_dynamic_thresh(axis);
-    if (t_norm <= 0.0f) {
+    float threshold_norm = get_dynamic_threshold(axis);
+    if (threshold_norm <= 0.0f) {
         return 0;
     }
-    float val = t_norm * (float)axis->cfg.max_raw + 0.5f;
-    val = clamp_f(val, 0.0f, (float)axis->cfg.max_raw);
-    return (uint16_t)val;
+    float threshold_scaled = threshold_norm * (float)axis->cfg.max_raw + 0.5f; // Round to nearest
+    threshold_scaled = clamp_f(threshold_scaled, 0.0f, (float)axis->cfg.max_raw);
+    return (uint16_t)threshold_scaled;
 }
-//</editor-fold>
-
-//</editor-fold>
-
-//</editor-fold>
-
