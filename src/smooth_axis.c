@@ -2,7 +2,9 @@
 // Created by Jonatan Vider on 30/11/2025.
 //
 #include "smooth_axis.h"
+#include "smooth_axis_debug.h"
 #include <math.h>
+
 
 //<editor-fold desc="Constants & #defines">
 // ----------------------------------------------------------------------------
@@ -35,11 +37,14 @@ static const float FULL_OFF_U                 = 0.0f;
 static const float FULL_ON_U                  = 1023.0f;
 static const float STICKY_U                   = 3.0f;
 static const float MOVE_THRESH_U              = 3.0f;
-static const float SMOOTH_AXIS_RESIDUAL       = 0.05f;
-static const float BETA                       =
+static const float EMA_CONVERGENCE_THRESHOLD  = 0.05f;
+static const float NOISE_SMOOTHING_RATE       =
                            0.005f; // threshold sensitivity to noise fluctuations
-static const float K                          =
+static const float THRESHOLD_NOISE_MULTIPLIER =
                            3.5f; // Threshold headroom coefficient (1.0 = no headroom)
+
+#define MAX_STICKY_ZONE 0.49f
+
 //</editor-fold>
 
 //<editor-fold desc="static-Inline tiny helpers">
@@ -64,7 +69,6 @@ static inline float map_f(float x, float in_min, float in_max, float out_min, fl
     if (in_max == in_min) {
         return out_min;  // avoid div by zero; degenerate case
     }
-    
     float t = (x - in_min) / (in_max - in_min);
     return out_min + t * (out_max - out_min);
 }
@@ -81,7 +85,7 @@ static inline float sign_of(const float residual) {
     return (residual > 0.0f) ? 1.0f : (residual < 0.0f) ? -1.0f : 0.0f;
 }
 
-static inline bool sign_has_flipped(const float current, const float previous) {
+static inline bool has_sign_flipped(const float current, const float previous) {
     float r_sign    = sign_of(current);
     float last_sign = sign_of(previous);
     
@@ -99,43 +103,50 @@ static void set_default_config(smooth_axis_config_t *cfg, uint16_t max_raw) {
     cfg->max_raw              = max_raw ? max_raw : 1;
     cfg->full_off_norm        = clamp_f_0_1(FULL_OFF_U / CANONICAL_MAX);
     cfg->full_on_norm         = clamp_f_0_1(FULL_ON_U / CANONICAL_MAX);
-    cfg->sticky_zone_norm     = clamp_f(STICKY_U / CANONICAL_MAX, 0.0f, 0.49f);
+    cfg->sticky_zone_norm     = clamp_f(STICKY_U / CANONICAL_MAX, 0.0f, MAX_STICKY_ZONE);
     cfg->movement_thresh_norm = clamp_f_0_1(MOVE_THRESH_U / CANONICAL_MAX);
 }
 
 // Normalize raw input and apply full_off/full_on clipping + re-lerp to [0..1]
 static float input_norm(const smooth_axis_t *axis, uint16_t raw_value) {
     uint16_t max_raw = axis->cfg.max_raw;
-    
     if (max_raw == 0) { /// zero division protection (should never)
         max_raw = 1;
     }
-    
     float norm = (float)raw_value / (float)max_raw;
     norm = clamp_f_0_1(norm);
-    
     float off = axis->cfg.full_off_norm;
     float on  = axis->cfg.full_on_norm;
-    
     if (on <= off) { /// corner case for safety
         off = 0.0f;
         on  = 1.0f;
     }
-    
-    norm = clamp_f(norm, off, on);
-    norm = map_f(norm, off, on, 0.0f, 1.0f);
+    norm      = clamp_f(norm, off, on);
+    norm      = map_f(norm, off, on, 0.0f, 1.0f);
     return norm;
 }
 //</editor-fold>
 
 //<editor-fold desc="Output Pipeline helpers">
 
+/*
+ * Internal helper of 'has_new_value()' API method
+ */
+static bool would_change_output(const smooth_axis_t *axis, float diff) {
+    // If the change is smaller than one quantization step in norm space,
+    // it cannot change the integer output → ignore.
+    float max_raw = axis->cfg.max_raw ? (float)axis->cfg.max_raw : 1.0f;
+    float epsilon = 1.0f / max_raw;
+    
+    return diff > epsilon;
+}
+
 static float get_dynamic_thresh(const smooth_axis_t *axis) {
     const float base_thresh = axis->cfg.movement_thresh_norm;
     
-    // Raw dynamic term driven only by _dev_norm
-    float       dyn_thresh  = K * axis->_dev_norm;
-    float       scaled      = dyn_thresh * axis->cfg._dyn_scale;
+    // Raw dynamic term driven only by _noise_estimate_norm
+    float dyn_thresh = THRESHOLD_NOISE_MULTIPLIER * axis->_noise_estimate_norm;
+    float scaled     = dyn_thresh * axis->cfg._settle_time_scaler;
     return clamp_f(scaled, 0.0f, 10.0f * base_thresh);
 }
 
@@ -151,8 +162,7 @@ static float get_dynamic_thresh(const smooth_axis_t *axis) {
 static float apply_sticky_margins(float axis_position, float sticky_margin_size) {
     
     /// why 0.49 ?  above >= 0.50 -> the floor and ceiling overlapping
-    sticky_margin_size = clamp_f(sticky_margin_size, 0.0f, 0.49f);
-    
+    sticky_margin_size = clamp_f(sticky_margin_size, 0.0f, MAX_STICKY_ZONE);
     float sticky_ceiling = 1.0f - sticky_margin_size;
     float sticky_floor   = sticky_margin_size;
     if (axis_position >= sticky_ceiling) { return 1.0f; }
@@ -163,7 +173,6 @@ static float apply_sticky_margins(float axis_position, float sticky_margin_size)
 }
 
 static float get_normalized(const smooth_axis_t *axis) {
-    
     if (!axis || !axis->_has_first_sample) {
         return 0.0f;
     }
@@ -181,23 +190,23 @@ static float get_normalized(const smooth_axis_t *axis) {
  * Key behaviour - This calculation only happens once (in both modes)
  *
  *  We calculate 'ema_rate' so that after settle_time_sec,
- *  the remaining distance to the target is reduced to 5% (SMOOTH_AXIS_RESIDUAL).
+ *  the remaining distance to the target is reduced to 5% (EMA_CONVERGENCE_THRESHOLD).
 
  * The math behind:
  * Given a 'settle_time' which was selected by the user,
  * compute 'ema_rate' such that:
- * alpha(dt) = 1 - exp(ema_rate * dt) , s.t.  ema_rate = ln(SMOOTH_AXIS_RESIDUAL) / settle_time
+ * alpha(dt) = 1 - exp(ema_rate * dt) , s.t.  ema_rate = ln(EMA_CONVERGENCE_THRESHOLD) / settle_time
  */
-static float compute_ema_rate(const float settle_time_sec) {
+static float compute_ema_decay_rate(const float settle_time_sec) {
     if (settle_time_sec <= 0.0f) {
         return 0.0f;
     }
-    float residual = clamp_f(SMOOTH_AXIS_RESIDUAL, 1e-4f, 0.9999f);
+    float residual = clamp_f(EMA_CONVERGENCE_THRESHOLD, 1e-4f, 0.9999f);
     float ln_r     = logf(residual);  // negative
     return ln_r / settle_time_sec;
 }
 
-static float ema_alpha_from_dt(const float k, const float dt_sec) {
+static float ema_alpha_from_live_dt(const float k, const float dt_sec) {
     if (dt_sec > 0.0f && k != 0.0f) {
         float ratio = clamp_f(k * dt_sec, -20.0f, 0.0f);
         return 1.0f - expf(ratio);
@@ -206,77 +215,62 @@ static float ema_alpha_from_dt(const float k, const float dt_sec) {
 }
 //</editor-fold>
 
-//<editor-fold desc="Error Handling |     todo - Apply across the board">
-#ifndef NDEBUG
-
-#include <stdio.h>
-#include <assert.h>
-
-static void handle_missing_time_source(void) {
-    fprintf(stderr, "smooth_axis_default_config_auto: now_ms is NULL\n");
-    assert(0 && "AUTO mode requires non-NULL now_ms");
-}
-
-#endif
-//</editor-fold>
 
 //<editor-fold desc="Warmup (AUTO) / First sample setter">
 
 
 
 
-static bool auto_warmup_has_finished(const smooth_axis_t *axis) {
+static bool is_warmup_finished(const smooth_axis_t *axis) {
     return axis->_warmup_cycles_done >= SMOOTH_AXIS_INIT_CALIBRATION_CYCLES;
 }
 
 // AUTO warm-up: measure frame dt, accumulate average, then derive _auto_alpha.
 static void auto_run_warmup_cycle_if_needed(smooth_axis_t *axis) {
     // Already calibrated - do nothing
-    if (auto_warmup_has_finished(axis)) { return; }
+    // Already calibrated - do nothing
+    if (is_warmup_finished(axis)) { return; }
     
-    if (!axis->cfg.now_ms) { // Misconfiguration error: no time source.
-#ifndef NDEBUG
-        handle_missing_time_source();
-#endif
-        return;
-    }
+    SMOOTH_AXIS_CHECK_RETURN(axis->cfg.now_ms != NULL, "AUTO mode requires now_ms function");
     
     uint32_t now_ms = axis->cfg.now_ms();
-    
     if (axis->_last_time_ms == 0) {
         axis->_last_time_ms = now_ms;
         return;
     }
-    
     float dt_ms = (float)(now_ms - axis->_last_time_ms);
     axis->_last_time_ms = now_ms;
-    
     dt_ms = clamp_f(dt_ms, SMOOTH_AXIS_AUTO_DT_MIN_MS, SMOOTH_AXIS_AUTO_DT_MAX_MS);
     float dt_sec = dt_ms / 1000.0f;
-    
     axis->_dt_accum_sec += dt_sec;
     axis->_warmup_cycles_done++;
     
-    if (auto_warmup_has_finished(axis)) {
+    // axis on auto mode should enter this block exactly once
+    if (is_warmup_finished(axis)) {
         float dt_avg = axis->_dt_accum_sec / (float)axis->_warmup_cycles_done;
-        
-        // NEW: use the same EMA math as LIVE_DT
-        axis->_auto_alpha = ema_alpha_from_dt(axis->cfg._ema_rate, dt_avg);
+        axis->_auto_alpha = ema_alpha_from_live_dt(axis->cfg._ema_decay_rate, dt_avg);
+        SMOOTH_DEBUGF("warmup complete: cycles=%u dt_avg=%.2fms alpha=%.4f",
+                      axis->_warmup_cycles_done,
+                      dt_avg * 1000.0f,
+                      axis->_auto_alpha);
     }
 }
 
-static bool register_first_sample(smooth_axis_t *axis, float norm) {
-    if (!axis->_has_first_sample) {
-        axis->_smoothed_norm    = norm;
-        axis->_has_first_sample = true;
-        return true; // handled; caller should return
-    }
-    return false;    // already initialized; continue with EMA
+static bool initialize_on_first_sample(smooth_axis_t *axis, float norm) {
+    if (axis->_has_first_sample) { return false; }  // already initialized; continue with EMA
+    
+    axis->_has_first_sample = true;
+    axis->_smoothed_norm    = norm;
+    axis->t_1               = norm;
+    axis->t_2               = norm;
+    
+    SMOOTH_DEBUGF("first sample: norm=%.3f", norm);
+    return true;
 }
 //</editor-fold>
 
 //<editor-fold desc="Update helpers">
-static void update_deviation(smooth_axis_t *axis, const float current_residual) {
+static void update_noise_estimate(smooth_axis_t *axis, const float current_residual) {
     /* About 'sign flip' :
  * True movement (often) has consecutive residuals from the same sign
  * ===============
@@ -289,18 +283,29 @@ static void update_deviation(smooth_axis_t *axis, const float current_residual) 
  * We only care about noise, and want to estimate it only when no true-movement
  * So if the sign flipped -> its noise -> update the noise level
  * Otherwise -> its a movement -> decrease the noise level  */
+    bool is_noise_sample = has_sign_flipped(current_residual, axis->_last_residual);
     
-    bool zero_crossed = sign_has_flipped(current_residual, axis->_last_residual);
     axis->_last_residual = current_residual;
     
-    float new_sample = zero_crossed ? abs_f(current_residual) : 0.0f;
-    float dev        = ema(axis->_dev_norm, new_sample, BETA);
-    axis->_dev_norm = clamp_f_0_1(dev);
+    float new_sample = is_noise_sample ? abs_f(current_residual) : 0.0f;
+    
+    float old_noise = axis->_noise_estimate_norm;
+    
+    float dev = ema(axis->_noise_estimate_norm, new_sample, NOISE_SMOOTHING_RATE);
+    axis->_noise_estimate_norm = clamp_f_0_1(dev);
+    
+    float noise_change = abs_f(axis->_noise_estimate_norm - old_noise);
+    if (noise_change > 0.01f) {  // More than 1% change
+        SMOOTH_DEBUGF("noise: %.4f -> %.4f %s",
+                      old_noise,
+                      axis->_noise_estimate_norm,
+                      is_noise_sample ? "(spike)" : "(settling)");
+    }
 }
 
 static void update_core(smooth_axis_t *axis, uint16_t raw_value, float alpha) {
     float norm = input_norm(axis, raw_value);
-    if (register_first_sample(axis, norm)) { return; }
+    if (initialize_on_first_sample(axis, norm)) { return; }
     
     // 1. Calculate the deviation
     float diff = norm - axis->_smoothed_norm;
@@ -309,7 +314,7 @@ static void update_core(smooth_axis_t *axis, uint16_t raw_value, float alpha) {
     axis->_smoothed_norm += alpha * diff;
     
     // 3. Update Noise (Exact same logic as your original)
-    update_deviation(axis, diff);
+    update_noise_estimate(axis, diff);
     
     /*
      * TODO - Note that the upper implementation change (corrected) noise logic a bit.
@@ -329,54 +334,58 @@ static void update_core(smooth_axis_t *axis, uint16_t raw_value, float alpha) {
 // ─────────────────────────────────────────────────────────────
 
 //<editor-fold desc="Init & Configs">
-void smooth_axis_default_config_auto(smooth_axis_config_t *cfg,
-                                     uint16_t max_raw,
-                                     float settle_time_sec,
-                                     smooth_axis_now_ms_fn now_ms) {
-    if (!cfg) { return; }
-
-#ifndef NDEBUG // Misconfiguration error: no time source.
-    if (!now_ms) {
-        handle_missing_time_source();
-    }
-#endif
+void smooth_axis_default_config_auto_dt(smooth_axis_config_t *cfg,
+                                        uint16_t max_raw,
+                                        float settle_time_sec,
+                                        smooth_axis_now_ms_fn now_ms) {
+    SMOOTH_AXIS_CHECK_RETURN(cfg != NULL, "config is NULL");
+    SMOOTH_AXIS_CHECK_RETURN(now_ms != NULL, "AUTO mode requires now_ms function");
+    
     set_default_config(cfg, max_raw);
     cfg->mode            = SMOOTH_AXIS_MODE_AUTO_DT;
     cfg->settle_time_sec = settle_time_sec;
     cfg->now_ms          = now_ms;
     
-    // NEW: AUTO also has a valid settle_k, so it can use ema_alpha_from_dt
-    cfg->_ema_rate  = compute_ema_rate(settle_time_sec);
-    cfg->_dyn_scale = compute_dyn_scale(settle_time_sec); // Calculate once
+    // NEW: AUTO also has a valid settle_k, so it can use ema_alpha_from_live_dt
+    cfg->_ema_decay_rate     = compute_ema_decay_rate(settle_time_sec);
+    cfg->_settle_time_scaler = compute_dyn_scale(settle_time_sec); // Calculate once
 }
 
-void smooth_axis_default_config_live_deltatime(smooth_axis_config_t *cfg,
-                                               uint16_t max_raw,
-                                               float settle_time_sec) {
-    if (!cfg) { return; }
+void smooth_axis_default_config_live_dt(smooth_axis_config_t *cfg,
+                                        uint16_t max_raw,
+                                        float settle_time_sec) {
+    SMOOTH_AXIS_CHECK_RETURN(cfg != NULL, "config is NULL");
     
     set_default_config(cfg, max_raw);
-    cfg->mode            = SMOOTH_AXIS_MODE_LIVE_DT;
-    cfg->settle_time_sec = settle_time_sec;
-    cfg->_ema_rate       = compute_ema_rate(settle_time_sec);
-    cfg->_dyn_scale      = compute_dyn_scale(settle_time_sec); // Calculate once
+    cfg->mode                = SMOOTH_AXIS_MODE_LIVE_DT;
+    cfg->settle_time_sec     = settle_time_sec;
+    cfg->_ema_decay_rate     = compute_ema_decay_rate(settle_time_sec);
+    cfg->_settle_time_scaler = compute_dyn_scale(settle_time_sec); // Calculate once
 }
 
 void smooth_axis_init(smooth_axis_t *axis, const smooth_axis_config_t *cfg) {
-    if (!axis || !cfg) { return; }
-    axis->cfg                 = *cfg;
-    axis->_smoothed_norm      = 0.0f;
-    axis->_dev_norm           = 0.01f;
-    axis->_last_reported_norm = 0.0f;
-    /// temporary alpha (default based on a FALLBACK_DELTA_TIME fixed update until warmup's done)
-    axis->_auto_alpha         = ema_alpha_from_dt(cfg->_ema_rate, FALLBACK_DELTA_TIME);
-    axis->_dt_accum_sec       = 0.0f;
-    axis->_warmup_cycles_done = 0;
-    axis->_last_time_ms       = 0;
-    axis->_last_residual      = 0.0f;
-    /// first loop iteration will flag this true
-    axis->_has_first_sample   = false;
+    SMOOTH_AXIS_CHECK_RETURN(axis != NULL, "axis is NULL");
+    SMOOTH_AXIS_CHECK_RETURN(cfg != NULL, "config is NULL");
+    SMOOTH_AXIS_CHECK_RETURN(cfg->mode != SMOOTH_AXIS_MODE_AUTO_DT || cfg->now_ms != NULL,
+                             "AUTO mode requires now_ms function");
     
+    axis->cfg                  = *cfg;
+    axis->_smoothed_norm       = 0.0f;
+    axis->_noise_estimate_norm = 0.01f;
+    axis->_last_reported_norm  = 0.0f;
+    /// temporary alpha (default based on a FALLBACK_DELTA_TIME fixed update until warmup's done)
+    axis->_auto_alpha          = ema_alpha_from_live_dt(cfg->_ema_decay_rate, FALLBACK_DELTA_TIME);
+    axis->_dt_accum_sec        = 0.0f;
+    axis->_warmup_cycles_done  = 0;
+    axis->_last_time_ms        = 0;
+    axis->_last_residual       = 0.0f;
+    /// first loop iteration will flag this true
+    axis->_has_first_sample    = false;
+    
+    SMOOTH_DEBUGF("init: mode=%s max_raw=%u settle_time=%.3fs",
+                  cfg->mode == SMOOTH_AXIS_MODE_AUTO_DT ? "AUTO_DT" : "LIVE_DT",
+                  cfg->max_raw,
+                  cfg->settle_time_sec);
 }
 //</editor-fold>
 
@@ -386,9 +395,10 @@ void smooth_axis_init(smooth_axis_t *axis, const smooth_axis_config_t *cfg) {
 // -----------------------------------------------------------------------------
 // TODO(jonatan): assert in debug if mode mismatch (AUTO vs LIVE_DT)
 
-void smooth_axis_update_auto(smooth_axis_t *axis, uint16_t raw_value) {
-    if (!axis) { return; }
-    if (axis->cfg.mode != SMOOTH_AXIS_MODE_AUTO_DT) { return; }
+void smooth_axis_update_auto_dt(smooth_axis_t *axis, uint16_t raw_value) {
+    SMOOTH_AXIS_CHECK_RETURN(axis != NULL, "axis is NULL");
+    SMOOTH_AXIS_CHECK_RETURN(axis->cfg.mode == SMOOTH_AXIS_MODE_AUTO_DT,
+                             "wrong mode: use update_live_dt() for LIVE_DT mode");
     
     auto_run_warmup_cycle_if_needed(axis);
     
@@ -396,12 +406,13 @@ void smooth_axis_update_auto(smooth_axis_t *axis, uint16_t raw_value) {
     update_core(axis, raw_value, axis->_auto_alpha);
 }
 
-void smooth_axis_update_live_deltatime(smooth_axis_t *axis, uint16_t raw_value, float dt_sec) {
-    if (!axis) { return; }
-    if (axis->cfg.mode != SMOOTH_AXIS_MODE_LIVE_DT) { return; }
+void smooth_axis_update_live_dt(smooth_axis_t *axis, uint16_t raw_value, float dt_sec) {
+    SMOOTH_AXIS_CHECK_RETURN(axis != NULL, "axis is NULL");
+    SMOOTH_AXIS_CHECK_RETURN(axis->cfg.mode == SMOOTH_AXIS_MODE_LIVE_DT,
+                             "wrong mode: use update_auto_dt() for AUTO_DT mode");
     
     /// In live dt mode, we calibrate alpha according to the new dt in each update
-    float live_alpha = ema_alpha_from_dt(axis->cfg._ema_rate, dt_sec);
+    float live_alpha = ema_alpha_from_live_dt(axis->cfg._ema_decay_rate, dt_sec);
     update_core(axis, raw_value, live_alpha);
 }
 //</editor-fold>
@@ -424,40 +435,33 @@ uint16_t smooth_axis_get_u16(const smooth_axis_t *axis) {
     // Read about 'Zeno's Paradox' to understand the following 2 lines below
     if (n <= 1.0f / max_out) { return 0; }
     if (n >= (max_out - 1.0) / max_out) { return axis->cfg.max_raw; }
-    
     return (uint16_t)lroundf(n * (float)max_out);
 }
 
 bool smooth_axis_has_new_value(smooth_axis_t *axis) {
-    if (!axis || !axis->_has_first_sample) { /// Protecting misuse
-        return false;
-    }
+    SMOOTH_AXIS_CHECK_RETURN_VAL(axis != NULL, "axis is NULL", false);
+    if (!axis->_has_first_sample) { return false; }
     
     float current = get_normalized(axis);
-    float last    = axis->_last_reported_norm;
-    float diff    = abs_f(current - last);
+    float diff    = abs_f(current - axis->_last_reported_norm);
     
-    // If the change is smaller than one quantization step in norm space,
-    // it cannot change the integer output → ignore.
-    
-    uint16_t max_raw = axis->cfg.max_raw ? axis->cfg.max_raw : 1;
-    float    epsilon = 1.0f / (float)max_raw;
-    if (diff <= epsilon) {
-        return false;
-    }
+    if (!would_change_output(axis, diff)) { return false; }
     
     // When approaching to the edges, we treat each movement (>= epsilon) as 'Always Important'
-    float sticky_ceil            = 1-axis->cfg.sticky_zone_norm;
-    float sticky_floor           = axis->cfg.sticky_zone_norm;
-    bool inside_the_sticky_edges = (current < sticky_floor) || (current > sticky_ceil);
-
-    float dyn_thresh = get_dynamic_thresh(axis);
+    float sticky_ceil   = 1 - axis->cfg.sticky_zone_norm;
+    float sticky_floor  = axis->cfg.sticky_zone_norm;
+    bool in_sticky_zone = (current < sticky_floor) || (current > sticky_ceil);
     
-    if (inside_the_sticky_edges || diff > dyn_thresh) {
+    float dyn_thresh = get_dynamic_thresh(axis);
+    if (in_sticky_zone || diff > dyn_thresh) {
         axis->_last_reported_norm = current;
+        SMOOTH_DEBUGF("new value: %.3f (diff=%.4f thresh=%.4f %s)",
+                      current,
+                      diff,
+                      dyn_thresh,
+                      in_sticky_zone ? "sticky" : "normal");
         return true;
     }
-    
     return false;
 }
 
@@ -468,14 +472,14 @@ bool smooth_axis_has_new_value(smooth_axis_t *axis) {
 // -----------------------------------------------------------------------------
 
 float smooth_axis_get_noise_norm(const smooth_axis_t *axis) {
-    return axis ? axis->_dev_norm : 0.0f;
+    return axis ? axis->_noise_estimate_norm : 0.0f;
 }
 
 float smooth_axis_get_effective_thresh_norm(const smooth_axis_t *axis) {
     return axis ? get_dynamic_thresh(axis) : 0.0f;
 }
 
-uint16_t smooth_axis_get_effective_thresh_u(const smooth_axis_t *axis) {
+uint16_t smooth_axis_get_effective_thresh_u16(const smooth_axis_t *axis) {
     if (!axis || axis->cfg.max_raw == 0) {
         return 0;
     }

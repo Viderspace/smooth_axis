@@ -18,7 +18,7 @@ add_executable(smooth_axis_tests
         tests/test_main.c
         tests/smooth_axis_scenario.c
         tests/smooth_axis_pipeline.c
-        tests/smooth_axis_time_stub.c)
+        tests/smooth_axis_time_stub.c include/smooth_axis_debug.h tests/test_debug_logging.c)
 
 target_link_libraries(smooth_axis_tests PRIVATE smooth_axis_lib)
 
