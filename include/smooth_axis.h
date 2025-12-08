@@ -16,7 +16,7 @@
  * smooth_axis_config_t cfg;
  * smooth_axis_t axis;
  *
- * smooth_axis_default_config_auto_dt(&cfg, 1023, 0.25f, my_timer_fn);
+ * smooth_axis_config_auto_dt(&cfg, 1023, 0.25f, my_timer_fn);
  * smooth_axis_init(&axis, &cfg);
  *
  * while (1) {
@@ -75,13 +75,13 @@ typedef enum {
  * Example (QMK):
  * @code
  * uint32_t qmk_now_ms(void) { return timer_read32(); }
- * smooth_axis_default_config_auto_dt(&cfg, 1023, 0.25f, qmk_now_ms);
+ * smooth_axis_config_auto_dt(&cfg, 1023, 0.25f, qmk_now_ms);
  * @endcode
  *
  * Example (Arduino):
  * @code
  * uint32_t arduino_now_ms(void) { return millis(); }
- * smooth_axis_default_config_auto_dt(&cfg, 1023, 0.25f, arduino_now_ms);
+ * smooth_axis_config_auto_dt(&cfg, 1023, 0.25f, arduino_now_ms);
  * @endcode
  */
 typedef uint32_t (*smooth_axis_now_ms_fn)(void);
@@ -90,8 +90,8 @@ typedef uint32_t (*smooth_axis_now_ms_fn)(void);
  * @brief Configuration for axis smoothing behavior
  *
  * Build using helper functions:
- * - smooth_axis_default_config_auto_dt() for AUTO_DT mode
- * - smooth_axis_default_config_live_dt() for LIVE_DT mode
+ * - smooth_axis_config_auto_dt() for AUTO_DT mode
+ * - smooth_axis_config_live_dt() for LIVE_DT mode
  *
  * All normalized parameters use range [0.0 .. 1.0] relative to max_raw.
  */
@@ -194,7 +194,7 @@ typedef struct smooth_axis_t {
  * @param[in]  settle_time_sec Time to ~95% settled after step (seconds)
  * @param[in]  now_ms         Monotonic millisecond timer function (required, non-NULL)
  *
- * @note Warmup takes 4096 cycles to calibrate dt. Use fallback alpha until complete.
+ * @note Warmup takes 512 cycles to calibrate dt. Use fallback alpha until complete.
  *
  * Example (QMK):
  * @code
@@ -203,14 +203,14 @@ typedef struct smooth_axis_t {
  *
  * uint32_t qmk_now_ms(void) { return timer_read32(); }
  *
- * smooth_axis_default_config_auto_dt(&cfg, 1023, 0.25f, qmk_now_ms);
+ * smooth_axis_config_auto_dt(&cfg, 1023, 0.25f, qmk_now_ms);
  * smooth_axis_init(&axis, &cfg);
  * @endcode
  */
-void smooth_axis_default_config_auto_dt(smooth_axis_config_t *cfg,
-                                        uint16_t max_raw,
-                                        float settle_time_sec,
-                                        smooth_axis_now_ms_fn now_ms);
+void smooth_axis_config_auto_dt(smooth_axis_config_t *cfg,
+                                uint16_t max_raw,
+                                float settle_time_sec,
+                                smooth_axis_now_ms_fn now_ms);
 
 /**
  * @brief Build config for LIVE_DT mode (deltatime passed each update)
@@ -229,7 +229,7 @@ void smooth_axis_default_config_auto_dt(smooth_axis_config_t *cfg,
  * smooth_axis_config_t cfg;
  * smooth_axis_t axis;
  *
- * smooth_axis_default_config_live_dt(&cfg, 1023, 0.25f);
+ * smooth_axis_config_live_dt(&cfg, 1023, 0.25f);
  * smooth_axis_init(&axis, &cfg);
  *
  * unsigned long last_us = micros();
@@ -243,9 +243,9 @@ void smooth_axis_default_config_auto_dt(smooth_axis_config_t *cfg,
  * }
  * @endcode
  */
-void smooth_axis_default_config_live_dt(smooth_axis_config_t *cfg,
-                                        uint16_t max_raw,
-                                        float settle_time_sec);
+void smooth_axis_config_live_dt(smooth_axis_config_t *cfg,
+                                uint16_t max_raw,
+                                float settle_time_sec);
 
 /**
  * @brief Initialize axis state from config
@@ -257,17 +257,31 @@ void smooth_axis_default_config_live_dt(smooth_axis_config_t *cfg,
  * @param[in]  cfg  Config to copy (must remain valid only during this call)
  *
  * @note After init, axis is ready for first update call.
- * @note AUTO_DT mode: First 4096 cycles perform warmup calibration.
+ * @note AUTO_DT mode: First 512 cycles perform warmup calibration.
  *
  * @code
  * smooth_axis_config_t cfg;
  * smooth_axis_t axis;
  *
- * smooth_axis_default_config_auto_dt(&cfg, 1023, 0.25f, my_timer_fn);
+ * smooth_axis_config_auto_dt(&cfg, 1023, 0.25f, my_timer_fn);
  * smooth_axis_init(&axis, &cfg);  // Ready to use
  * @endcode
  */
 void smooth_axis_init(smooth_axis_t *axis, const smooth_axis_config_t *cfg);
+
+/**
+ * @brief Reset axis state to initial conditions
+ *
+ * Clears smoothing history and optionally teleports to new position.
+ * Useful for layer switches, sleep wake, or mode changes.
+ *
+ * @param[in,out] axis      Axis to reset
+ * @param[in]     raw_value Initial position (0 = start at zero)
+ *
+ * @note In AUTO_DT mode, does NOT restart warmup (keeps calibrated alpha)
+ * @note If raw_value is 0, starts at zero. Pass current sensor value to avoid jump.
+ */
+void smooth_axis_reset(smooth_axis_t *axis, uint16_t raw_value);
 
 // ----------------------------------------------------------------------------
 // Core update API (call one of these each loop)
@@ -282,7 +296,7 @@ void smooth_axis_init(smooth_axis_t *axis, const smooth_axis_config_t *cfg);
  * @param[in,out] axis      Axis state (mode must be AUTO_DT)
  * @param[in]     raw_value Current ADC reading [0 .. max_raw]
  *
- * @note First 4096 calls perform warmup to measure average dt.
+ * @note First 512 calls perform warmup to measure average dt.
  * @note Wrong mode: Calling this in LIVE_DT mode does nothing (checked by assertion).
  *
  * @code
@@ -455,7 +469,7 @@ uint16_t smooth_axis_get_effective_thresh_u16(const smooth_axis_t *axis);
 //   smooth_axis_config_t cfg;
 //   smooth_axis_t        axis;
 //
-//   smooth_axis_default_config_auto_dt(&cfg, 1023, 0.25f, my_now_ms);
+//   smooth_axis_config_auto_dt(&cfg, 1023, 0.25f, my_now_ms);
 //   smooth_axis_init(&axis, &cfg);
 //
 //   for (;;) {

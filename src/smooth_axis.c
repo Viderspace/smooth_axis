@@ -11,10 +11,10 @@
 #include "smooth_axis_debug.h"
 #include <math.h>
 
-// -----------------------------------------------------------------------------
+// ----------------------------------------------------------------------------
 // Internal Constants
-// -----------------------------------------------------------------------------
-static const uint16_t SMOOTH_AXIS_INIT_CALIBRATION_CYCLES = 4096;
+// ----------------------------------------------------------------------------
+static const uint16_t SMOOTH_AXIS_INIT_CALIBRATION_CYCLES = 256;
 
 // Clamp measured dt during AUTO warmup to avoid pathological cases
 static const float SMOOTH_AXIS_AUTO_DT_MIN_MS = 0.1f;   // 10,000 Hz max
@@ -200,7 +200,12 @@ static float get_alpha_from_dt(const float k, const float dt_sec) {
         float ratio = clamp_f(k * dt_sec, -20.0f, 0.0f);  // Prevent overflow
         return 1.0f - expf(ratio);
     }
-    return 1.0f;  // Fallback: instant response (no smoothing)
+    // Fallback: instant response (no smoothing)
+    // Legitimate cases: k (settle_time) = 0 , or dt=0 (first frame)
+    // Bug case: negative dt (should assert in debug)
+    SMOOTH_AXIS_ASSERT(dt_sec >= 0.0f || k == 0.0f,
+                       "negative dt is invalid");
+    return 1.0f;
 }
 
 // ============================================================================
@@ -211,7 +216,7 @@ static bool is_warmup_finished(const smooth_axis_t *axis) {
     return axis->_warmup_cycles_done >= SMOOTH_AXIS_INIT_CALIBRATION_CYCLES;
 }
 
-// Measure average dt over 4096 samples, then compute fixed alpha (AUTO_DT only)
+// Measure average dt over 512 samples, then compute fixed alpha (AUTO_DT only)
 static void auto_run_warmup_cycle_if_needed(smooth_axis_t *axis) {
     if (is_warmup_finished(axis)) { return; }
     
@@ -276,6 +281,7 @@ static void update_noise_estimate(smooth_axis_t *axis, const float current_resid
     axis->_noise_estimate_norm = ema(axis->_noise_estimate_norm, new_sample, NOISE_SMOOTHING_RATE);
     axis->_noise_estimate_norm = clamp_f_0_1(axis->_noise_estimate_norm);
     
+    
     // Debug: log significant noise changes
     float noise_change = abs_f(axis->_noise_estimate_norm - old_noise);
     if (noise_change > 0.01f) {
@@ -310,10 +316,10 @@ static void update_core(smooth_axis_t *axis, uint16_t raw_value, float alpha) {
 // Public API - Configuration
 // ============================================================================
 
-void smooth_axis_default_config_auto_dt(smooth_axis_config_t *cfg,
-                                        uint16_t max_raw,
-                                        float settle_time_sec,
-                                        smooth_axis_now_ms_fn now_ms) {
+void smooth_axis_config_auto_dt(smooth_axis_config_t *cfg,
+                                uint16_t max_raw,
+                                float settle_time_sec,
+                                smooth_axis_now_ms_fn now_ms) {
     SMOOTH_AXIS_CHECK_RETURN(cfg != NULL, "config is NULL");
     SMOOTH_AXIS_CHECK_RETURN(now_ms != NULL, "AUTO mode requires now_ms function");
     
@@ -325,9 +331,9 @@ void smooth_axis_default_config_auto_dt(smooth_axis_config_t *cfg,
     cfg->_settle_time_scaler = compute_dyn_scale(settle_time_sec);
 }
 
-void smooth_axis_default_config_live_dt(smooth_axis_config_t *cfg,
-                                        uint16_t max_raw,
-                                        float settle_time_sec) {
+void smooth_axis_config_live_dt(smooth_axis_config_t *cfg,
+                                uint16_t max_raw,
+                                float settle_time_sec) {
     SMOOTH_AXIS_CHECK_RETURN(cfg != NULL, "config is NULL");
     
     set_default_config(cfg, max_raw);
@@ -359,6 +365,18 @@ void smooth_axis_init(smooth_axis_t *axis, const smooth_axis_config_t *cfg) {
                   cfg->mode == SMOOTH_AXIS_MODE_AUTO_DT ? "AUTO_DT" : "LIVE_DT",
                   cfg->max_raw,
                   cfg->settle_time_sec);
+}
+
+void smooth_axis_reset(smooth_axis_t *axis, uint16_t raw_value) {
+    SMOOTH_AXIS_CHECK_RETURN(axis != NULL, "axis is NULL");
+    
+    float norm = raw_value ? input_norm(axis, raw_value) : 0.0f;
+    
+    axis->_smoothed_norm       = norm;
+    axis->_noise_estimate_norm = 0.01f;
+    axis->_last_reported_norm  = norm;
+    axis->_last_residual       = 0.0f;
+    axis->_has_first_sample    = raw_value ? true : false;
 }
 
 
@@ -425,11 +443,11 @@ bool smooth_axis_has_new_value(smooth_axis_t *axis) {
     
     if (in_sticky_zone || diff > dynamic_threshold) {
         axis->_last_reported_norm = current;
-        
+    
         SMOOTH_DEBUGF("new value: %.3f (diff=%.4f thresh=%.4f %s)",
                       current,
                       diff,
-                      dyn_thresh,
+                      dynamic_threshold,
                       in_sticky_zone ? "sticky" : "normal");
         return true;
     }
