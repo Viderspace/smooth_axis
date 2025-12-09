@@ -504,3 +504,5 @@ uint16_t smooth_axis_get_effective_thresh_u16(const smooth_axis_t *axis);
 // distorted by the ramp shape itself.
 //</editor-fold>
 
+
+// Sync test
