@@ -14,7 +14,7 @@ A single-axis filter that lets you specify response time in seconds instead of o
 - **Frame-rate independent** — same behavior at 60Hz or 1000Hz
 - **Zero false updates** — tested across 10,000+ events under extreme noise
 - **100% monotonic output** — signal never reverses direction during transitions
-- **Tiny footprint** — no heap allocation, ~40 bytes RAM per axis
+- **Tiny footprint** — no heap allocation, ~88 bytes RAM per axis
 
 ---
 
@@ -52,11 +52,11 @@ Raw ADC readings from analog sensors are noisy. The standard solution is an Expo
 smoothed = alpha * raw + (1 - alpha) * smoothed;
 ```
 
-This creates two problems:
+This has two issues:
 
-1. **Alpha is meaningless.** What does `alpha = 0.1` feel like? How does it change if your loop runs faster? You end up tuning by trial and error.
+1. **Alpha is unintuitive.** What does `alpha = 0.1` feel like? How should it change if your loop runs faster? You end up tuning by trial and error.
 
-2. **EMA doesn't solve the update problem.** A smoothed signal still fluctuates. When do you act on a change? A fixed threshold either triggers on noise (too sensitive) or misses real movement (too sluggish). The optimal threshold depends on current noise conditions — which change.
+2. **EMA doesn't solve the update problem.** A smoothed signal still fluctuates. When do you act on a change? A fixed threshold either fires on noise (too sensitive) or misses real movement (too sluggish). The right threshold depends on current noise level — which varies.
 
 ---
 
@@ -70,56 +70,67 @@ Instead of alpha, you specify **settle time** — how long the filter takes to r
 smooth_axis_config_auto_dt(&cfg, 1023, 0.25f, timer_fn);  // 250ms settle time
 ```
 
-The library computes the correct alpha internally, accounting for your actual frame rate. The same settle time produces the same physical response whether you run at 100Hz or 1000Hz.
+The library computes the appropriate alpha internally based on your actual frame rate.
 
 | Settle Time | Character |
 |-------------|-----------|
 | 50–100ms | Responsive, tracks fast movement |
 | 200–300ms | Balanced feel for most applications |
-| 500ms–1s | Heavily smoothed, cinematic |
+| 500ms–1s | Heavily smoothed, slow/cinematic |
 
-### Noise-Aware Thresholding
+### Noise-Adaptive Change Detection
 
-The library maintains a real-time estimate of input noise and scales the change-detection threshold accordingly:
+The real work happens in deciding *when to report a change*. The library maintains a real-time noise estimate and scales the threshold dynamically:
 
 - **Low noise** → small threshold → responsive to subtle movement
-- **High noise** → large threshold → stable output, no false triggers
+- **High noise** → large threshold → stable, no false triggers
 
-The threshold scales between 1× and 10× of the base value, adapting automatically as conditions change.
+The threshold scales between 1× and 10× of the base value, adapting as conditions change.
 
-### Sign-Flip Discrimination
+#### Sign-Flip Discrimination
 
 The core insight: **noise oscillates, movement is directional.**
 
-When the input is noisy but stationary, the EMA residual (difference between raw and smoothed) flips sign frequently — the noise bounces above and below the true value. During real movement, the residual maintains consistent sign as the filter "catches up" in one direction.
+When input is noisy but stationary, the EMA residual (raw − smoothed) flips sign frequently as noise bounces above and below the true value. During real movement, the residual maintains consistent sign — the filter is always "catching up" in one direction.
 
-The library tracks residual sign flips and uses this to distinguish noise from signal:
+The library uses this property:
 
-- Frequent sign flips → input is noise → raise threshold
-- Consistent sign → real movement → lower threshold
+- Frequent sign flips → noise → raise the threshold
+- Consistent sign → real movement → lower the threshold
 
-This allows aggressive noise rejection during static periods without sacrificing response speed during actual movement.
+This allows aggressive noise rejection while stationary without sacrificing response speed during movement.
 
-### Sticky Zones
+#### In Practice
 
-Analog sensors often have unreliable behavior at their extremes. Sticky zones create hysteresis at the endpoints:
+The chart below shows the algorithm under stress: 5 noise levels × 5 settle times, from pristine (top row) to torture-test conditions (bottom row, 25% timing jitter + 10% Gaussian noise).
 
-- Values near 0 snap to exactly 0
-- Values near max snap to exactly max
-- Small movements within the sticky zone are absorbed
-- Larger movements escape the zone normally
+![Environment matrix](docs/settle_time_behavior_matrix.png)
 
-This prevents endpoint dithering and guarantees clean 0% and 100% output when the physical control is at its limits.
+Watch the **dotted yellow line** (noise activation threshold) in each cell:
 
----
+- During the **static segments** (before and after the ramp), sign flips are frequent. The threshold rises to suppress false updates.
+- During the **ramp**, movement is directional — sign flips stop. The threshold drops rapidly, allowing the filter to track without lag.
 
-## Performance
+Even in the bottom-left cell (torture noise + 50ms settle time), where the pink input signal is chaotic, the blue output rises cleanly and monotonically.
 
-Tested across a matrix of conditions: 5 noise levels × 5 settle times × multiple runs.
+| Metric | Result |
+|--------|--------|
+| Monotonic accuracy | **100%** |
+| False updates | **0 / 10,271** |
+
+#### Graceful Degradation
+
+Compare the 50ms column top-to-bottom. With clean input (top-left), the algorithm produces ~350 updates over the transition. Under torture-test noise (bottom-left), it produces only 27.
+
+This is deliberate. When noise threatens to overwhelm the signal, the algorithm trades granularity for stability. The threshold rises until only unambiguous movement gets through. The output becomes coarser — effectively bit-crushed — but remains *correct*: monotonic, no false updates, still tracking the actual movement.
+
+27 clean updates are more useful than 350 jittery ones.
+
+That said, the torture row represents extreme stress conditions unlikely in practice. In real-world use — even with mediocre hardware — most applications fall somewhere in the top three rows, where degradation is negligible and the full resolution of your sensor comes through.
 
 ### Settle-Time Accuracy
 
-The filter delivers what you ask for. Measured time to reach 95% of target vs. requested settle time:
+The settle-time parameter means what it says. Measured time to 95% vs. requested:
 
 ![Settle-time accuracy chart](docs/step_accuracy.png)
 
@@ -128,18 +139,16 @@ The filter delivers what you ask for. Measured time to reach 95% of target vs. r
 | Clean input | 1.07% |
 | Noisy input (8% jitter, 4% gaussian) | 2.76% |
 
-### Noise Rejection
+### Sticky Zones
 
-Stress-tested from pristine to extreme conditions (up to 25% timing jitter + 10% Gaussian noise):
+Analog sensors often behave unreliably at their extremes. Sticky zones create hysteresis at the endpoints:
 
-![Environment matrix](docs/settle_time_behavior_matrix.png)
+- Values near 0 snap to exactly 0
+- Values near max snap to exactly max
+- Small movements within the zone are absorbed
+- Larger movements escape normally
 
-| Metric | Result |
-|--------|--------|
-| Monotonic accuracy | **100%** |
-| False updates | **0 / 10,271** |
-
-The output never reverses direction during transitions, and no spurious updates occur even under torture-test noise levels.
+This prevents endpoint dithering and guarantees clean 0% / 100% output when the control is at its physical limits.
 
 ---
 
@@ -262,8 +271,7 @@ smooth_axis_config_auto_dt(&cfg, 1023, 0.25f, arduino_timer);
 
 ### Memory Usage
 
-- `smooth_axis_config_t`: ~36 bytes
-- `smooth_axis_t`: ~56 bytes (includes embedded config)
+- `smooth_axis_t`: ~88 bytes (includes embedded config, system-dependent due to padding)
 - No dynamic allocation
 - Stack-safe for constrained environments
 
