@@ -503,6 +503,3 @@ uint16_t smooth_axis_get_effective_thresh_u16(const smooth_axis_t *axis);
 // since the target is static after the jump and timing isn't
 // distorted by the ramp shape itself.
 //</editor-fold>
-
-
-// Sync test
