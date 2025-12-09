@@ -13,12 +13,12 @@ add_library(smooth_axis_lib src/smooth_axis.c)
 
 
 # Demo / test executable
-add_executable(smooth_axis_demo examples/demo_basic.c)
+add_executable(smooth_axis_demo archived/demo_basic.c)
 add_executable(smooth_axis_tests
         tests/test_main.c
         tests/smooth_axis_scenario.c
         tests/smooth_axis_pipeline.c
-        tests/smooth_axis_time_stub.c include/smooth_axis_debug.h tests/test_debug_logging.c tests/step_response_test.c)
+        tests/smooth_axis_time_stub.c src/smooth_axis_debug.h tests/test_debug_logging.c tests/step_response_test.c)
 
 target_link_libraries(smooth_axis_tests PRIVATE smooth_axis_lib)
 

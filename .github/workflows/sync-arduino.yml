@@ -1,0 +1,29 @@
+name: Sync Core to Arduino
+
+on:
+  push:
+    paths:
+      - 'src/**'
+    branches:
+      - master
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Alpha
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Push to Beta (Arduino Repo)
+        uses: cpina/github-action-push-to-another-repository@main
+        env:
+          API_TOKEN_GITHUB: ${{ secrets.API_TOKEN_GITHUB }}
+        with:
+          source-directory: 'src'
+          destination-github-username: 'Viderspace'
+          destination-repository-name: 'Smooth-Axis-Arduino'
+          target-directory: 'src/core'
+          user-email: 'viderspace@gmail.com'
+          target-branch: master
