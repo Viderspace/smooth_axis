@@ -5,16 +5,30 @@
 A single-axis filter that lets you specify response time in seconds instead of opaque filter coefficients. Designed for potentiometers, sliders, and analog sensors on resource-constrained platforms.
 
 ---
+## Why I Built This
+In every project involving analog sensors or potentiometers, I ran into the same headaches: 
+the input is noisy, unstable, or often refuses to hit true 0% and 100%.
+
+You can’t build an LED dimmer that glows faintly when the slider is physically off. 
+You can’t build a networked system that triggers events based on jittery input that sends false updates. 
+
+I wrote smooth_axis to solve this once and for all. I wanted the most "boring" API possible —one that distinguishes real movement from noise
+without tuning opaque math coefficients for Exponential Averages, or paying the latency and memory bill of maintaining a sliding window mean/median.
+
+The result is a library that lets you define responsiveness in time (seconds). It filters out false reports, handles the math behind the scenes, and just works.
+Plus I created a set of fine-tuning tools for handling common hardware issues.
+
+---
 
 ## Features
 
-- **Settle-time tuning** — specify responsiveness in seconds, not alpha values
-- **Noise-adaptive thresholding** — automatically distinguishes noise from real movement
+- **Settle-time tuning** — specify responsiveness in seconds (50ms, 200ms, 1s)
 - **Resolution agnostic** — works with any ADC resolution up to 16-bit
 - **Frame-rate independent** — same behavior at 60Hz or 1000Hz
-- **Zero false updates** — tested across 10,000+ events under extreme noise
-- **100% monotonic output** — signal never reverses direction during transitions
+- **Noise-adaptive thresholding** — automatically distinguishes noise from real movement
+- **Clear, filtered signal** — signal never reverses direction during transitions, 100% monotonic output.
 - **Tiny footprint** — no heap allocation, ~88 bytes RAM per axis
+- **Compatibility** - C99 standard with no dependencies. Ported to Arduino (Upcoming - QMK). [(details)](#ports)  
 
 ---
 
@@ -52,11 +66,13 @@ Raw ADC readings from analog sensors are noisy. The standard solution is an Expo
 smoothed = alpha * raw + (1 - alpha) * smoothed;
 ```
 
-This has two issues:
+This has three issues:
 
-1. **Alpha is unintuitive.** What does `alpha = 0.1` feel like? How should it change if your loop runs faster? You end up tuning by trial and error.
+1. **Alpha is unintuitive.** What does `alpha = 0.1` feel like? Is that sluggish or responsive? You end up tuning by trial and error with no mental model to guide you.
 
-2. **EMA doesn't solve the update problem.** A smoothed signal still fluctuates. When do you act on a change? A fixed threshold either fires on noise (too sensitive) or misses real movement (too sluggish). The right threshold depends on current noise level — which varies.
+2. **Alpha is frame-rate dependent.** The same alpha value produces different physical behavior at different loop speeds. Add a heavy function call to your loop, or run on slower hardware, and suddenly your carefully-tuned slider feels different. Alpha isn't a property of the filter — it's entangled with your program's timing.
+
+3. **EMA doesn't solve the update problem.** A smoothed signal still fluctuates. When do you act on a change? A fixed threshold either fires on noise (too sensitive) or misses real movement (too sluggish). The right threshold depends on current noise level — which varies.
 
 ---
 
@@ -70,13 +86,26 @@ Instead of alpha, you specify **settle time** — how long the filter takes to r
 smooth_axis_config_auto_dt(&cfg, 1023, 0.25f, timer_fn);  // 250ms settle time
 ```
 
-The library computes the appropriate alpha internally based on your actual frame rate.
+The library computes the appropriate alpha internally based on your actual frame rate. Ask for 250ms and you get 250ms — whether your loop runs at 100Hz or 1000Hz, whether you're on an 8-bit AVR or a 32-bit ARM.
 
 | Settle Time | Character |
 |-------------|-----------|
 | 50–100ms | Responsive, tracks fast movement |
 | 200–300ms | Balanced feel for most applications |
 | 500ms–1s | Heavily smoothed, slow/cinematic |
+
+#### Accuracy
+
+Measured settle time vs. requested, across a range of timing parameters:
+
+![Settle-time accuracy chart](docs/step_accuracy.png)
+
+| Condition | MAPE |
+|-----------|------|
+| Clean input | 1.07% |
+| Noisy input (8% jitter, 4% gaussian) | 2.76% |
+
+The conversion holds even under noise. When you ask for 500ms, you get 498–502ms.
 
 ### Noise-Adaptive Change Detection
 
@@ -128,17 +157,6 @@ This is deliberate. When noise threatens to overwhelm the signal, the algorithm 
 
 That said, the torture row represents extreme stress conditions unlikely in practice. In real-world use — even with mediocre hardware — most applications fall somewhere in the top three rows, where degradation is negligible and the full resolution of your sensor comes through.
 
-### Settle-Time Accuracy
-
-The settle-time parameter means what it says. Measured time to 95% vs. requested:
-
-![Settle-time accuracy chart](docs/step_accuracy.png)
-
-| Condition | MAPE |
-|-----------|------|
-| Clean input | 1.07% |
-| Noisy input (8% jitter, 4% gaussian) | 2.76% |
-
 ### Sticky Zones
 
 Analog sensors often behave unreliably at their extremes. Sticky zones create hysteresis at the endpoints:
@@ -152,7 +170,8 @@ This prevents endpoint dithering and guarantees clean 0% / 100% output when the 
 
 ---
 
-## API Reference
+<details>
+<summary><h2>API Reference</h2></summary>
 
 ### Configuration
 
@@ -211,9 +230,10 @@ float    smooth_axis_get_effective_thresh_norm(const smooth_axis_t *axis);
 uint16_t smooth_axis_get_effective_thresh_u16(const smooth_axis_t *axis);
 ```
 
----
+</details>
 
-## Configuration Guide
+<details>
+<summary><h2>Configuration Guide</h2></summary>
 
 ### Choosing a Mode
 
@@ -245,9 +265,11 @@ smooth_axis_init(&axis, &cfg);
 | `sticky_zone_norm` | ~0.3% | Endpoint hysteresis |
 | `movement_thresh_norm` | ~0.3% | Base change threshold |
 
----
+</details>
 
-## Platform Notes
+<details>
+<summary><h2>Platform Notes</h2></summary>
+<a id='ports'></a>
 
 ### QMK
 
@@ -274,6 +296,8 @@ smooth_axis_config_auto_dt(&cfg, 1023, 0.25f, arduino_timer);
 - `smooth_axis_t`: ~88 bytes (includes embedded config, system-dependent due to padding)
 - No dynamic allocation
 - Stack-safe for constrained environments
+
+</details>
 
 ---
 
