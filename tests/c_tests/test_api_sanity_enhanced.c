@@ -18,7 +18,7 @@
 #include <assert.h>
 #include <math.h>
 #include <stdbool.h>
-#include "../src/smooth_axis.h"
+#include "smooth_axis.h"
 
 // ============================================================================
 // Test Helpers

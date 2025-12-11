@@ -5,7 +5,7 @@
 #include <string.h>
 #include <sys/stat.h>
 
-#include "../src/smooth_axis.h"
+#include "smooth_axis.h"
 
 
 // -----------------------------------------------------------------------------

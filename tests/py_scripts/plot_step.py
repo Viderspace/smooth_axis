@@ -436,7 +436,7 @@ def main():
     SummaryReporter.generate_summary(summary_clean, summary_noisy, Config.OUTPUT_TXT)
 
     print("\n✓ Done! All outputs generated successfully.")
-    plt.show()
+    # plt.show()
 
 
 if __name__ == "__main__":

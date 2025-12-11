@@ -20,7 +20,7 @@
 #include <sys/stat.h>
 #include <errno.h>
 #include <unistd.h>
-#include "../src/smooth_axis.h"
+#include "smooth_axis.h"
 
 // -----------------------------------------------------------------------------
 // Output Configuration

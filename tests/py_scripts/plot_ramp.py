@@ -512,7 +512,7 @@ def main():
         avg_timing_error = s.accum_abs_error_pct / s.timing_sample_count
         print(f"Average Timing Inaccuracy:  {avg_timing_error:.2%} (MAPE over {s.timing_sample_count} tests)")
 
-    plt.show()
+    # plt.show()
 
 
 if __name__ == "__main__":

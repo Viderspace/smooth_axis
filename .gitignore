@@ -20,3 +20,21 @@ Makefile
 smooth_axis_demo
 *.o
 *.a
+
+# Test data outputs (regeneratable)
+tests/data/ramp_files/*.csv
+tests/data/step_files/*.csv
+#tests/data/renders/*.png
+
+# Compiled test binaries
+tests/*.out
+tests/test_api
+tests/ramp_test
+tests/step_test
+
+# Python cache
+tests/py_scripts/__pycache__/
+tests/scripts/*.pyc
+
+# Archived/legacy code
+archived/
