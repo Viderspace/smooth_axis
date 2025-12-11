@@ -98,7 +98,7 @@ The library computes the appropriate alpha internally based on your actual frame
 
 Measured settle time vs. requested, across a range of timing parameters:
 
-![Settle-time accuracy chart](docs/step_accuracy.png)
+![Settle-time accuracy chart](docs/step_response_accuracy.png)
 
 | Condition | MAPE |
 |-----------|------|
@@ -310,3 +310,4 @@ MIT
 ## Author
 
 Jonatan Vider
+
