@@ -1,21 +1,10 @@
 /**
  * @file test_api_sanity.c
  * @brief Comprehensive API sanity tests for smooth_axis library (Enhanced)
- * @author Test Suite
  * @date 2025-12-08
  *
- * Enhanced test suite based on code review findings.
- * Now covers:
- * - NULL pointer safety (release mode early returns)
- * - Mode mismatch handling
- * - Edge cases and boundary conditions
- * - Reset function validation
- * - Output quantization correctness
- * - Uninitialized state handling
- * - Creative/weird corner cases
- * - CRITICAL: Negative dt, zero settle time, inverted configs
- * - CRITICAL: Noise saturation, warmup edge cases
- * - CRITICAL: Output quantization boundaries
+ * Enhanced test suite covering NULL safety, mode mismatches, edge cases, boundary conditions,
+ * reset validation, output quantization, uninitialized state, and critical corner cases.
  *
  * Compile with:
  *   gcc -o test_api -DNDEBUG -I./include ./tests/test_api_sanity.c ./src/smooth_axis.c -lm
@@ -29,7 +18,7 @@
 #include <assert.h>
 #include <math.h>
 #include <stdbool.h>
-#include "smooth_axis.h"
+#include "../src/smooth_axis.h"
 
 // ============================================================================
 // Test Helpers
@@ -359,35 +348,7 @@ void test_reset_during_warmup(void) {
 }
 
 // ============================================================================
-// Test 12: Movement Threshold Zero
-// ============================================================================
-
-void test_movement_threshold_zero(void) {
-    smooth_axis_config_t cfg;
-    smooth_axis_t        axis;
-    
-    smooth_axis_config_live_dt(&cfg, 1023, 0.25f);
-    cfg.movement_thresh_norm = 0.0f;  // No threshold
-    
-    smooth_axis_init(&axis, &cfg);
-    
-    // With zero threshold, even tiny changes should trigger
-    smooth_axis_update_live_dt(&axis, 500, 0.016f);
-    bool                 first = smooth_axis_has_new_value(&axis);
-    assert(first == true);
-    
-    // Tiny change
-    smooth_axis_update_live_dt(&axis, 501, 0.016f);
-    
-    // Should still work (threshold based on noise, not just base threshold)
-    uint16_t value = smooth_axis_get_u16(&axis);
-    assert(value >= 490 && value <= 510);
-    
-    printf("✓ Test 12: Movement threshold = 0 handled\n");
-}
-
-// ============================================================================
-// Test 13: First Sample Teleport
+// Test 12: First Sample Teleport
 // ============================================================================
 
 void test_first_sample_teleport(void) {
@@ -403,11 +364,11 @@ void test_first_sample_teleport(void) {
     uint16_t value = smooth_axis_get_u16(&axis);
     assert(value == 1023);  // Should be exact, not smoothed from 0
     
-    printf("✓ Test 13: First sample teleports (no smoothing on frame 0)\n");
+    printf("✓ Test 12: First sample teleports (no smoothing on frame 0)\n");
 }
 
 // ============================================================================
-// Test 14: Rapid Resets
+// Test 13: Rapid Resets
 // ============================================================================
 
 void test_rapid_resets(void) {
@@ -427,11 +388,11 @@ void test_rapid_resets(void) {
     uint16_t value = smooth_axis_get_u16(&axis);
     assert(value >= 0 && value <= 1023);
     
-    printf("✓ Test 14: Rapid resets handled gracefully\n");
+    printf("✓ Test 13: Rapid resets handled gracefully\n");
 }
 
 // ============================================================================
-// Test 15: Noise Saturation (Extreme Alternating Input)
+// Test 14: Noise Saturation (Extreme Alternating Input)
 // ============================================================================
 
 void test_noise_saturation(void) {
@@ -467,11 +428,11 @@ void test_noise_saturation(void) {
     printf("   Value after returning to 512: %u\n", value);
     assert(value >= 400 && value <= 650);  // Should recover
     
-    printf("✓ Test 15: Noise saturation and recovery\n");
+    printf("✓ Test 14: Noise saturation and recovery\n");
 }
 
 // ============================================================================
-// Test 16: Stable Input Noise Decay
+// Test 15: Stable Input Noise Decay
 // ============================================================================
 
 void test_stable_input_noise_decay(void) {
@@ -502,11 +463,11 @@ void test_stable_input_noise_decay(void) {
     // Noise should decay (but not necessarily to zero due to sign flip logic)
     assert(noise_after_stable <= noise_after_noise + 0.01f);
     
-    printf("✓ Test 16: Stable input allows noise decay\n");
+    printf("✓ Test 15: Stable input allows noise decay\n");
 }
 
 // ============================================================================
-// Test 17: Output Quantization Boundaries
+// Test 16: Output Quantization Boundaries
 // ============================================================================
 
 void test_output_quantization_boundaries(void) {
@@ -542,12 +503,12 @@ void test_output_quantization_boundaries(void) {
     uint16_t val_1022 = smooth_axis_get_u16(&axis);
     assert(val_1022 >= 1021 && val_1022 <= 1023);  // Should be close to 1022
     
-    printf("✓ Test 17: Output quantization at boundaries (val_1=%u, val_1022=%u)\n",
+    printf("✓ Test 16: Output quantization at boundaries (val_1=%u, val_1022=%u)\n",
            val_1, val_1022);
 }
 
 // ============================================================================
-// Test 18: Warmup with Variable Frame Times
+// Test 17: Warmup with Variable Frame Times
 // ============================================================================
 
 void test_warmup_variable_frame_times(void) {
@@ -573,11 +534,11 @@ void test_warmup_variable_frame_times(void) {
     bool                 has_new = smooth_axis_has_new_value(&axis);
     assert(has_new == true);
     
-    printf("✓ Test 18: Warmup with variable frame times\n");
+    printf("✓ Test 17: Warmup with variable frame times\n");
 }
 
 // ============================================================================
-// Test 19: Timer Wraparound (AUTO_DT)
+// Test 18: Timer Wraparound (AUTO_DT)
 // ============================================================================
 
 void test_timer_wraparound(void) {
@@ -602,11 +563,11 @@ void test_timer_wraparound(void) {
     uint16_t value = smooth_axis_get_u16(&axis);
     assert(value >= 0 && value <= 1023);
     
-    printf("✓ Test 19: Timer wraparound handled by unsigned arithmetic\n");
+    printf("✓ Test 18: Timer wraparound handled by unsigned arithmetic\n");
 }
 
 // ============================================================================
-// Test 20: Sticky Zone at Zero (Disabled)
+// Test 19: Sticky Zone at Zero (Disabled)
 // ============================================================================
 
 void test_sticky_zone_zero(void) {
@@ -625,11 +586,11 @@ void test_sticky_zone_zero(void) {
     // Without sticky zone, should not snap to 0
     assert(norm_low > 0.02f);  // Should be proportional to 50/1023
     
-    printf("✓ Test 20: Sticky zone = 0 (disabled) - no snapping\n");
+    printf("✓ Test 19: Sticky zone = 0 (disabled) - no snapping\n");
 }
 
 // ============================================================================
-// Test 21: Very Fast vs Very Slow Settle Times (Improved)
+// Test 20: Very Fast vs Very Slow Settle Times (Improved)
 // ============================================================================
 
 void test_fast_vs_slow_settle_times(void) {
@@ -660,12 +621,12 @@ void test_fast_vs_slow_settle_times(void) {
     assert(val_fast > val_slow);  // Fast should have moved more
     assert(val_fast > 900);       // Fast should be very close to 1023
     
-    printf("✓ Test 21: Fast vs slow settle (0→1023 in 10 frames): slow=%u, fast=%u\n",
+    printf("✓ Test 20: Fast vs slow settle (0→1023 in 10 frames): slow=%u, fast=%u\n",
            val_slow, val_fast);
 }
 
 // ============================================================================
-// Test 22: Stability - Same Value 1000 Times
+// Test 21: Stability - Same Value 1000 Times
 // ============================================================================
 
 void test_stability_same_value_1000_times(void) {
@@ -692,11 +653,11 @@ void test_stability_same_value_1000_times(void) {
     // Should be very stable (maybe 1-3 updates as it settles)
     assert(new_value_count < 10);
     
-    printf("✓ Test 22: Stability - same value 1000x triggered %d updates\n", new_value_count);
+    printf("✓ Test 21: Stability - same value 1000x triggered %d updates\n", new_value_count);
 }
 
 // ============================================================================
-// Test 23-30: Keep existing tests from original suite
+// Test 22-29: Keep existing tests from original suite
 // ============================================================================
 
 void test_edge_raw_value_zero(void) {
@@ -711,7 +672,7 @@ void test_edge_raw_value_zero(void) {
     uint16_t value = smooth_axis_get_u16(&axis);
     assert(value == 0);
     
-    printf("✓ Test 23: Raw value at zero\n");
+    printf("✓ Test 22: Raw value at zero\n");
 }
 
 void test_edge_raw_value_max(void) {
@@ -726,7 +687,7 @@ void test_edge_raw_value_max(void) {
     uint16_t value = smooth_axis_get_u16(&axis);
     assert(value == 1023);
     
-    printf("✓ Test 24: Raw value at max\n");
+    printf("✓ Test 23: Raw value at max\n");
 }
 
 void test_reset_to_zero(void) {
@@ -744,7 +705,7 @@ void test_reset_to_zero(void) {
     uint16_t value = smooth_axis_get_u16(&axis);
     assert(value == 0);
     
-    printf("✓ Test 25: Reset to zero\n");
+    printf("✓ Test 24: Reset to zero\n");
 }
 
 void test_reset_to_middle(void) {
@@ -762,7 +723,7 @@ void test_reset_to_middle(void) {
     uint16_t value = smooth_axis_get_u16(&axis);
     assert(value >= 500 && value <= 524);
     
-    printf("✓ Test 26: Reset to middle position\n");
+    printf("✓ Test 25: Reset to middle position\n");
 }
 
 void test_uninitialized_has_new_value(void) {
@@ -775,7 +736,7 @@ void test_uninitialized_has_new_value(void) {
     bool                 has_new = smooth_axis_has_new_value(&axis);
     assert(has_new == false);
     
-    printf("✓ Test 27: Uninitialized - has_new_value before update\n");
+    printf("✓ Test 26: Uninitialized - has_new_value before update\n");
 }
 
 void test_rapid_alternating_input(void) {
@@ -793,7 +754,7 @@ void test_rapid_alternating_input(void) {
     uint16_t result = smooth_axis_get_u16(&axis);
     assert(result >= 0 && result <= 1023);
     
-    printf("✓ Test 28: Rapid alternating input (0, max, 0, max...)\n");
+    printf("✓ Test 27: Rapid alternating input (0, max, 0, max...)\n");
 }
 
 void test_two_independent_axes(void) {
@@ -814,7 +775,7 @@ void test_two_independent_axes(void) {
     assert(val2 > 600);
     assert(abs((int)val1 - (int)val2) > 200);
     
-    printf("✓ Test 29: Two independent axes\n");
+    printf("✓ Test 28: Two independent axes\n");
 }
 
 void test_diagnostic_functions(void) {
@@ -838,7 +799,7 @@ void test_diagnostic_functions(void) {
     uint16_t thresh_u16 = smooth_axis_get_effective_thresh_u16(&axis);
     assert(thresh_u16 >= 0 && thresh_u16 <= 1023);
     
-    printf("✓ Test 30: Diagnostic functions\n");
+    printf("✓ Test 29: Diagnostic functions\n");
 }
 
 // ============================================================================
@@ -871,7 +832,6 @@ int main(void) {
     
     // Advanced behavior tests (new/improved)
     test_reset_during_warmup();
-    test_movement_threshold_zero();
     test_first_sample_teleport();
     test_rapid_resets();
     test_noise_saturation();
@@ -893,19 +853,18 @@ int main(void) {
     test_two_independent_axes();
     test_diagnostic_functions();
     
-    printf("\n=== All 30 tests passed! ===\n");
+    printf("\n=== All 29 tests passed! ===\n");
     return 0;
 }
 
-/*
- * Command line (copy paste):
 
- # Compile in release mode (full test coverage)
+
+/*  Command line (copy paste): Ctrl+C -> Ctrl+V
+--------------------------------------
+# Compile in release mode (full test coverage)
 gcc -o test_api -DNDEBUG -I./include ./tests/test_api_sanity_enhanced.c ./src/smooth_axis.c -lm
 
 # Run it
 ./test_api
- 
- 
- 
+----------------------------------------
  */

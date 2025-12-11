@@ -1,7 +1,6 @@
 /**
  * @file step_response_test.c
  * @brief Step response test harness for smooth_axis settle time accuracy
- * @author Generated test harness
  * @date 2025-12-08
  *
  * Tests settle time accuracy using step input (900 → 100) and 95% threshold detection.
@@ -13,32 +12,32 @@
  *   - step_trace_clean_XXms.csv: Detailed traces for clean condition (8 files)
  *   - step_trace_noisy_XXms.csv: Detailed traces for noisy condition (8 files)
  */
-
 #include <stdio.h>
 #include <stdint.h>
 #include <stdbool.h>
 #include <math.h>
 #include <string.h>
-
-#include "smooth_axis.h"
+#include <sys/stat.h>
+#include <errno.h>
+#include <unistd.h>
+#include "../src/smooth_axis.h"
 
 // -----------------------------------------------------------------------------
 // Output Configuration
 // -----------------------------------------------------------------------------
-
-#define OUTPUT_DIR "/Users/jonatanvider/Documents/smooth_axis_c_library/artifacts/step_test_files"
+#define OUTPUT_DIR "tests/data/step_files"
 
 // -----------------------------------------------------------------------------
 // Test Configuration
 // -----------------------------------------------------------------------------
 
-#define DT_SEC          0.0002f   // 1ms timestep (1kHz sensor simulation)
-#define DURATION_SEC    1.5f     // Total test duration (0.3s before + 1.2s after step)
-#define STEP_TIME_SEC   0.3f     // When step occurs
+#define DT_SEC          0.0001f    // 0.1ms timestep (1kHz sensor simulation)
+#define DURATION_SEC    1.5f      // Total test duration (0.3s before + 1.2s after step)
+#define STEP_TIME_SEC   0.3f      // When step occurs
 
-#define RAW_HIGH        900      // Initial value (top of step)
-#define RAW_LOW         100      // Target value (bottom of step)
-#define MAX_RAW         1023     // 10-bit ADC
+#define RAW_HIGH        900       // Initial value (top of step)
+#define RAW_LOW         100       // Target value (bottom of step)
+#define MAX_RAW         1023      // 10-bit ADC
 
 // 95% settle detection
 #define SETTLE_FRACTION 0.95f
@@ -63,6 +62,42 @@ typedef enum {
   CONDITION_CLEAN,   // No noise, no jitter
   CONDITION_NOISY    // 4% noise, 8% jitter
 }                  test_condition_t;
+
+
+
+
+// Check if running from project root
+static bool validate_working_directory(void) {
+    struct stat st;
+    // Check if we can see the tests/ directory
+    if (stat("tests", &st) != 0 || !S_ISDIR(st.st_mode)) {
+        fprintf(stderr, "\nERROR: Must run from project root directory!\n");
+        fprintf(stderr, "Current directory doesn't contain 'tests/' folder.\n");
+        fprintf(stderr, "\nUsage:\n");
+        fprintf(stderr, "  cd /path/to/smooth_axis\n");
+        fprintf(stderr, "  ./build/ramp_test\n\n");
+        return false;
+    }
+    return true;
+}
+
+// Create output directory if it doesn't exist
+static bool ensure_output_dir(const char *path) {
+    struct stat st;
+    if (stat(path, &st) == 0 && S_ISDIR(st.st_mode)) {
+        return true;  // Already exists
+    }
+    
+    // Try to create it (assumes parent dirs exist)
+    if (mkdir(path, 0755) == 0) {
+        return true;
+    }
+    
+    fprintf(stderr, "ERROR: Cannot create output directory: %s\n", path);
+    fprintf(stderr, "Please run: mkdir -p %s\n", path);
+    return false;
+}
+
 
 // -----------------------------------------------------------------------------
 // Random Number Generator (from smooth_axis_scenario.c)
@@ -93,7 +128,7 @@ static float rand_normal01(unsigned int *state) {
 // -----------------------------------------------------------------------------
 
 /**
- * @brief Apply gaussian noise to raw ADC value
+ * @brief Apply Gaussian noise to raw ADC value
  */
 uint16_t apply_noise(uint16_t raw, unsigned int *rng) {
     float max_raw_f = (float)MAX_RAW;
@@ -181,7 +216,7 @@ test_result_t run_step_test(float settle_time_sec,
     uint16_t     last_out    = 0;  // Tracks last declared value (only updates on has_new)
     
     for (int i = 0; i < total_steps; i++) {
-        // Generate step input: high for first 1 second, then low
+        // Generate step input: high for first 0.3 seconds, then low
         uint16_t raw_clean = (t < STEP_TIME_SEC) ? RAW_HIGH : RAW_LOW;
         
         // Apply noise if noisy condition
@@ -203,10 +238,8 @@ test_result_t run_step_test(float settle_time_sec,
         // Update filter
         smooth_axis_update_live_dt(&axis, raw, dt);
         
-        // Get current EMA output
         uint16_t raw_ema = smooth_axis_get_u16(&axis);
         
-        // Check for has_new_value and update out_u16 accordingly
         int has_new = 0;
         if (smooth_axis_has_new_value(&axis)) {
             last_out = smooth_axis_get_u16(&axis);
@@ -220,11 +253,9 @@ test_result_t run_step_test(float settle_time_sec,
             }
         }
         
-        // Get introspection data
         float noise_norm  = smooth_axis_get_noise_norm(&axis);
         float thresh_norm = smooth_axis_get_effective_thresh_norm(&axis);
         
-        // Write trace data
         fprintf(trace_file, "%.0f,%u,%u,%d,%d,%u,%.6f,%.6f\n",
                 t * 1000.0f,  // time_ms
                 raw,          // raw_input
@@ -325,19 +356,29 @@ void run_test_suite(test_condition_t condition, const char *condition_name) {
 // -----------------------------------------------------------------------------
 
 int main(void) {
+    // Validate we're in the right place
+    if (!validate_working_directory()) {
+        return 1;
+    }
+    
+    // Ensure output directory exists
+    if (!ensure_output_dir(OUTPUT_DIR)) {
+        return 1;
+    }
+    
     printf("=== Step Response Test for smooth_axis ===\n");
     printf("Configuration:\n");
     printf("  Step: %u → %u (step size = %d)\n", RAW_HIGH, RAW_LOW, STEP_SIZE);
     printf("  95%% threshold: %.1f\n", THRESHOLD_95);
     printf("  dt: %.3f ms (%.0f Hz)\n", DT_SEC * 1000.0f, 1.0f / DT_SEC);
     printf("  Duration: %.1f seconds\n", DURATION_SEC);
-    
+
     // Run clean condition tests
     run_test_suite(CONDITION_CLEAN, "CLEAN CONDITIONS");
-    
+
     // Run noisy condition tests
     run_test_suite(CONDITION_NOISY, "NOISY CONDITIONS (4% noise, 8% jitter)");
-    
+
     printf("\nDone. Results written to:\n");
     printf("  Directory: %s\n", OUTPUT_DIR);
     printf("  Summary files:\n");
@@ -346,6 +387,6 @@ int main(void) {
     printf("  Trace files:\n");
     printf("    - step_trace_clean_*.csv (5 files)\n");
     printf("    - step_trace_noisy_*.csv (5 files)\n");
-    
+
     return 0;
 }
