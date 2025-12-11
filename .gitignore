@@ -7,7 +7,7 @@ out/
 CMakeCache.txt
 CMakeFiles/
 cmake_install.cmake
-Makefile
+# Makefile  ← DELETE THIS LINE
 
 # IDE metadata
 .idea/
@@ -24,7 +24,13 @@ smooth_axis_demo
 # Test data outputs (regeneratable)
 tests/data/ramp_files/*.csv
 tests/data/step_files/*.csv
-#tests/data/renders/*.png
+tests/data/step_files/*.txt
+tests/data/renders/*.png
+
+# Keep directory structure
+!tests/data/ramp_files/.gitkeep
+!tests/data/step_files/.gitkeep
+!tests/data/renders/.gitkeep
 
 # Compiled test binaries
 tests/*.out
@@ -34,7 +40,7 @@ tests/step_test
 
 # Python cache
 tests/py_scripts/__pycache__/
-tests/scripts/*.pyc
+tests/py_scripts/*.pyc
 
 # Archived/legacy code
 archived/
