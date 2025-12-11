@@ -1,6 +1,7 @@
 /**
  * @file smooth_axis.h
- * @brief Adaptive sensor smoothing with noise-aware change detection
+ * @brief Adaptive analog-signal smoothing
+ *
  * @author Jonatan Vider
  * @date 30/11/2025
  *
@@ -119,13 +120,6 @@ typedef struct {
    */
   float sticky_zone_norm;
   
-  /**
-   * Minimum movement threshold for extreme noise bursts (base level before dynamic scaling).
-   * Signal is stable up to ~10% gaussian noise with defaults. Only increase for severe noise.
-   * Warning: Higher values increase quantization and reduce responsiveness.
-   */
-  float movement_thresh_norm;
-  
   // --- Smoothing mode + main user knob ---
   /** Operating mode: AUTO_DT or LIVE_DT */
   smooth_axis_mode_t mode;
@@ -151,8 +145,8 @@ typedef struct {
   /** @internal EMA decay rate constant derived from settle_time_sec */
   float _ema_decay_rate;
   
-  /** @internal Pre-calculated scaler for dynamic threshold based on settle_time_sec */
-  float _settle_time_scaler;
+  /** @internal Pre-calculated scalar for dynamic threshold based on settle_time_sec */
+  float _threshold_attenuation;
 } smooth_axis_config_t;
 
 /**
@@ -194,7 +188,7 @@ typedef struct smooth_axis_t {
  * @param[in]  settle_time_sec Time to ~95% settled after step (seconds)
  * @param[in]  now_ms         Monotonic millisecond timer function (required, non-NULL)
  *
- * @note Warmup takes 512 cycles to calibrate dt. Use fallback alpha until complete.
+ * @note Warmup takes 256 cycles to calibrate dt. Use fallback alpha until complete.
  *
  * Example (QMK):
  * @code
@@ -257,7 +251,7 @@ void smooth_axis_config_live_dt(smooth_axis_config_t *cfg,
  * @param[in]  cfg  Config to copy (must remain valid only during this call)
  *
  * @note After init, axis is ready for first update call.
- * @note AUTO_DT mode: First 512 cycles perform warmup calibration.
+ * @note AUTO_DT mode: First 256 cycles perform warmup calibration.
  *
  * @code
  * smooth_axis_config_t cfg;
@@ -296,7 +290,7 @@ void smooth_axis_reset(smooth_axis_t *axis, uint16_t raw_value);
  * @param[in,out] axis      Axis state (mode must be AUTO_DT)
  * @param[in]     raw_value Current ADC reading [0 .. max_raw]
  *
- * @note First 512 calls perform warmup to measure average dt.
+ * @note First 256 calls perform warmup to measure average dt.
  * @note Wrong mode: Calling this in LIVE_DT mode does nothing (checked by assertion).
  *
  * @code
@@ -371,7 +365,7 @@ float smooth_axis_get_norm(const smooth_axis_t *axis);
  * @return Integer position [0 .. max_raw]
  *
  * @note Returns 0 if axis is NULL or uninitialized.
- * @note Rounds to nearest integer (uses lroundf internally).
+ * @note Rounds to nearest integer (uses lroundf() internally).
  * @note Guarantees exact 0 and max_raw at endpoints (no off-by-one).
  */
 uint16_t smooth_axis_get_u16(const smooth_axis_t *axis);
@@ -458,48 +452,3 @@ uint16_t smooth_axis_get_effective_thresh_u16(const smooth_axis_t *axis);
 #ifdef __cplusplus
 }
 #endif
-
-
-//<editor-fold desc="OLD COMMENTS GRAVEYARD">
-// -----------------------------------------------------------------------------
-// Overview
-//
-// Typical usage:
-//
-//   smooth_axis_config_t cfg;
-//   smooth_axis_t        axis;
-//
-//   smooth_axis_config_auto_dt(&cfg, 1023, 0.25f, my_now_ms);
-//   smooth_axis_init(&axis, &cfg);
-//
-//   for (;;) {
-//       uint16_t raw = read_adc();
-//       smooth_axis_update_auto_dt(&axis, raw);
-//       if (smooth_axis_has_new_value(&axis)) {
-//           uint16_t new_value = smooth_axis_get_u16_full(&axis);
-//           do_something_when_the_value_changed(new_value);
-//           ...
-//       }
-//   }
-
-// -----------------------------------------------------------------------------
-// TODO (docs):
-// Add note about settle-time accuracy:
-//
-// - With clean input (no noise), smooth_axis reaches ~95% of target in
-//   settle_time_sec with typical error around ±4%.
-// - Under heavy noise, timing MAPE increases (~20–25%), but monotonicity
-//   and false-update protection remain perfect (0 false updates in tests).
-//
-// Emphasize in docs that the algorithm prioritizes stability and correctness
-// over exact settle-time matching when noise is present.
-// -----------------------------------------------------------------------------
-
-// TODO (tests/docs):
-// Add a clean step-response test:
-//   input: 100,100,...,100, 900,900,...,900 (fixed dt)
-// Use this to measure true EMA settle-time (95% of step).
-// Expect even lower MAPE (<4%) vs the current 1s ramp tests,
-// since the target is static after the jump and timing isn't
-// distorted by the ramp shape itself.
-//</editor-fold>

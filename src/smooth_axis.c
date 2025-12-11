@@ -27,13 +27,13 @@ static const float FALLBACK_DELTA_TIME        = 0.016f; // 60 Hz assumption befo
 // Default "Feel" Parameters (normalized to 1023 ADC range)
 // ----------------------------------------------------------------------------
 
-static const float CANONICAL_MAX = 1023.0f;
+static const float CANONICAL_MAX = 1023.0f; // Reference resolution scale
 static const float FULL_OFF_U    = 0.0f;    // No dead zone by default
 static const float FULL_ON_U     = 1023.0f; // No dead zone by default
 static const float STICKY_U      = 3.0f;    // ~0.3% magnetic zone
-static const float MOVE_THRESH_U = 3.0f;    // ~0.3% base threshold
+static const float MAX_THRESH_U  = 30.0f;    // ~2.9% upper threshold limit
 
-// EMA convergence: 5% remaining error = "settled"
+// EMA convergence: 5% remaining = "settled" (Reached 95%)
 static const float EMA_CONVERGENCE_THRESHOLD = 0.05f;
 
 // Noise estimation: slow EMA for stable noise floor tracking
@@ -42,7 +42,8 @@ static const float NOISE_SMOOTHING_RATE = 0.005f;
 // Dynamic threshold headroom: threshold = 3.5x noise estimate
 static const float THRESHOLD_NOISE_MULTIPLIER = 3.5f;
 
-static const float MAX_STICKY_ZONE = 0.49f; //Prevent floor/ceiling overlap (0.5 would be ambiguous)
+//Prevent floor/ceiling overlap (0.5 =< would be ambiguous)
+static const float MAX_STICKY_ZONE = 0.49f;
 
 
 // ============================================================================
@@ -106,7 +107,6 @@ static void set_default_config(smooth_axis_config_t *cfg, uint16_t max_raw) {
     cfg->full_off_norm        = clamp_f_0_1(FULL_OFF_U / CANONICAL_MAX);
     cfg->full_on_norm         = clamp_f_0_1(FULL_ON_U / CANONICAL_MAX);
     cfg->sticky_zone_norm     = clamp_f(STICKY_U / CANONICAL_MAX, 0.0f, MAX_STICKY_ZONE);
-    cfg->movement_thresh_norm = clamp_f_0_1(MOVE_THRESH_U / CANONICAL_MAX);
 }
 
 // Normalize raw ADC [0..max_raw] to [0..1], with full_off/full_on dead zone clipping
@@ -145,11 +145,9 @@ static bool would_change_output(const smooth_axis_t *axis, float diff) {
 
 // Dynamic threshold: scales with noise level, clamped to [1x .. 10x] of base threshold
 static float get_dynamic_threshold(const smooth_axis_t *axis) {
-    const float base_thresh = axis->cfg.movement_thresh_norm;
-    
-    float dyn_thresh = THRESHOLD_NOISE_MULTIPLIER * axis->_noise_estimate_norm;
-    float scaled     = dyn_thresh * axis->cfg._settle_time_scaler;
-    return clamp_f(scaled, 0.0f, 10.0f * base_thresh);
+    float dynamic_threshold = THRESHOLD_NOISE_MULTIPLIER * axis->_noise_estimate_norm;
+    float scaled            = dynamic_threshold * axis->cfg._threshold_attenuation;
+    return clamp_f(scaled, 0.0f, MAX_THRESH_U / CANONICAL_MAX);
 }
 
 // Apply sticky zones: endpoints snap to exact 0.0/1.0, middle region re-stretched to [0..1]
@@ -193,7 +191,7 @@ static float compute_ema_decay_rate(const float settle_time_sec) {
     return ln_r / settle_time_sec;
 }
 
-// Convert decay rate k and time step dt into EMA alpha
+// Convert decay rate k and time step dt into EMA alpha.
 // alpha = 1 - exp(k·dt), clamped for numerical stability
 static float get_alpha_from_dt(const float k, const float dt_sec) {
     if (dt_sec > 0.0f && k != 0.0f) {
@@ -216,7 +214,7 @@ static bool is_warmup_finished(const smooth_axis_t *axis) {
     return axis->_warmup_cycles_done >= SMOOTH_AXIS_INIT_CALIBRATION_CYCLES;
 }
 
-// Measure average dt over 512 samples, then compute fixed alpha (AUTO_DT only)
+// Measure average dt over 256 samples, then compute fixed alpha (AUTO_DT only)
 static void auto_run_warmup_cycle_if_needed(smooth_axis_t *axis) {
     if (is_warmup_finished(axis)) { return; }
     
@@ -298,17 +296,9 @@ static void update_core(smooth_axis_t *axis, uint16_t raw_value, float alpha) {
     if (initialize_on_first_sample(axis, norm)) { return; }
     
     float diff = norm - axis->_smoothed_norm;
-    
     axis->_smoothed_norm += alpha * diff; // EMA: x += α·(target - x)
     
     update_noise_estimate(axis, diff);
-    
-    /*
-     * Note - the upper implementation changed (corrected) noise logic a bit.
-     * original:
-     * axis->_smoothed_norm = ema(axis->_smoothed_norm, norm, alpha);
-     * update_deviation_norm_with_sign_flip(axis, norm);
-     */
 }
 
 
@@ -324,11 +314,11 @@ void smooth_axis_config_auto_dt(smooth_axis_config_t *cfg,
     SMOOTH_AXIS_CHECK_RETURN(now_ms != NULL, "AUTO mode requires now_ms function");
     
     set_default_config(cfg, max_raw);
-    cfg->mode                = SMOOTH_AXIS_MODE_AUTO_DT;
-    cfg->settle_time_sec     = settle_time_sec;
-    cfg->now_ms              = now_ms;
-    cfg->_ema_decay_rate     = compute_ema_decay_rate(settle_time_sec);
-    cfg->_settle_time_scaler = compute_dyn_scale(settle_time_sec);
+    cfg->mode                   = SMOOTH_AXIS_MODE_AUTO_DT;
+    cfg->settle_time_sec        = settle_time_sec;
+    cfg->now_ms                 = now_ms;
+    cfg->_ema_decay_rate        = compute_ema_decay_rate(settle_time_sec);
+    cfg->_threshold_attenuation = compute_dyn_scale(settle_time_sec);
 }
 
 void smooth_axis_config_live_dt(smooth_axis_config_t *cfg,
@@ -337,10 +327,10 @@ void smooth_axis_config_live_dt(smooth_axis_config_t *cfg,
     SMOOTH_AXIS_CHECK_RETURN(cfg != NULL, "config is NULL");
     
     set_default_config(cfg, max_raw);
-    cfg->mode                = SMOOTH_AXIS_MODE_LIVE_DT;
-    cfg->settle_time_sec     = settle_time_sec;
-    cfg->_ema_decay_rate     = compute_ema_decay_rate(settle_time_sec);
-    cfg->_settle_time_scaler = compute_dyn_scale(settle_time_sec);
+    cfg->mode                   = SMOOTH_AXIS_MODE_LIVE_DT;
+    cfg->settle_time_sec        = settle_time_sec;
+    cfg->_ema_decay_rate        = compute_ema_decay_rate(settle_time_sec);
+    cfg->_threshold_attenuation = compute_dyn_scale(settle_time_sec);
 }
 
 void smooth_axis_init(smooth_axis_t *axis, const smooth_axis_config_t *cfg) {
