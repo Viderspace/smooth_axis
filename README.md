@@ -1,14 +1,19 @@
 # smooth_axis
 
+<img src="docs/visuals/funny_hero.gif" width="480">
+
+
 ![C99](https://img.shields.io/badge/C-99-blue.svg)
 ![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)
 ![No Dependencies](https://img.shields.io/badge/dependencies-none-brightgreen.svg)
 
+
 **Adaptive sensor smoothing for embedded systems.**
+
 
 Specify responsiveness in seconds, not filter coefficients. Get stable output from noisy ADCs—no false updates, no jitter, no reversal during transitions.
 
-Tested across 25 stress conditions: **100% monotonic accuracy, 0 false updates** out of 10,261 total, even under 25% timing jitter and 10% Gaussian noise.
+Tested across 25 stress conditions: **100% monotonic accuracy, 0 false updates** out of 10,261 total, even under 25% timing jitter and 10% noise[^1].
 
 ---
 
@@ -56,7 +61,7 @@ Settle-time accuracy across clean and noisy conditions:
 | Condition | Mean Absolute % Error |
 |-----------|----------------------|
 | Clean input | 0.77% |
-| Noisy input (8% jitter, 4% Gaussian) | 2.20% |
+| Noisy input (8% jitter[^2], 4% Gaussian) | 2.20% |
 
 Behavior under stress (5 noise levels × 5 settle times):
 
@@ -201,3 +206,8 @@ MIT
 ## Author
 
 [Jonatan Vider](https://github.com/Viderspace) - [LinkedIn](http://www.linkedin.com/in/viderspace)
+
+
+[^1]: **Noise percentage** is defined as the Maximum-Peak-Deviation ($3\sigma$) from the true signal. This ensures that 99.7% of all noise artifacts are contained within the specified $\pm\%$ boundary.
+
+[^2]: **Jitter percentage** is defined as the Maximum-Timing-Deviation from the ideal sampling interval. This ensures that the time between updates ($\Delta t$) fluctuates by no more than the specified $\pm\%$ due to system latency or scheduling irregularities.

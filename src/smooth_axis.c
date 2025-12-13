@@ -103,10 +103,10 @@ static inline bool has_sign_flipped(const float current, const float previous) {
 
 // Apply library defaults from canonical constants (normalized to user's max_raw)
 static void set_default_config(smooth_axis_config_t *cfg, uint16_t max_raw) {
-    cfg->max_raw              = max_raw ? max_raw : 1;
-    cfg->full_off_norm        = clamp_f_0_1(FULL_OFF_U / CANONICAL_MAX);
-    cfg->full_on_norm         = clamp_f_0_1(FULL_ON_U / CANONICAL_MAX);
-    cfg->sticky_zone_norm     = clamp_f(STICKY_U / CANONICAL_MAX, 0.0f, MAX_STICKY_ZONE);
+    cfg->max_raw          = max_raw ? max_raw : 1;
+    cfg->full_off_norm    = clamp_f_0_1(FULL_OFF_U / CANONICAL_MAX);
+    cfg->full_on_norm     = clamp_f_0_1(FULL_ON_U / CANONICAL_MAX);
+    cfg->sticky_zone_norm = clamp_f(STICKY_U / CANONICAL_MAX, 0.0f, MAX_STICKY_ZONE);
 }
 
 // Normalize raw ADC [0..max_raw] to [0..1], with full_off/full_on dead zone clipping
@@ -145,9 +145,9 @@ static bool would_change_output(const smooth_axis_t *axis, float diff) {
 
 // Dynamic threshold: scales with noise level, clamped to [1x .. 10x] of base threshold
 static float get_dynamic_threshold(const smooth_axis_t *axis) {
-    float dynamic_threshold = THRESHOLD_NOISE_MULTIPLIER * axis->_noise_estimate_norm;
-    float scaled            = dynamic_threshold * axis->cfg._threshold_attenuation;
-    return clamp_f(scaled, 0.0f, MAX_THRESH_U / CANONICAL_MAX);
+    float dynamic_threshold      = THRESHOLD_NOISE_MULTIPLIER * axis->_noise_estimate_norm;
+    float settle_time_attenuated = dynamic_threshold * axis->cfg._threshold_attenuation;
+    return clamp_f(settle_time_attenuated, 0.0f, MAX_THRESH_U / CANONICAL_MAX);
 }
 
 // Apply sticky zones: endpoints snap to exact 0.0/1.0, middle region re-stretched to [0..1]
@@ -186,6 +186,7 @@ static float compute_ema_decay_rate(const float settle_time_sec) {
     if (settle_time_sec <= 0.0f) {
         return 0.0f;
     }
+    // (ln(0) = NAN , ln(1) = 0 (No decay)
     float residual = clamp_f(EMA_CONVERGENCE_THRESHOLD, 1e-4f, 0.9999f);
     float ln_r     = logf(residual);  // negative
     return ln_r / settle_time_sec;
@@ -271,7 +272,8 @@ static void update_noise_estimate(smooth_axis_t *axis, const float current_resid
     bool is_noise_sample = has_sign_flipped(current_residual, axis->_last_residual);
     axis->_last_residual = current_residual;
     
-    // Sign flip → likely noise, update estimate. No flip → likely movement, decay estimate.
+    /* === Sign Flip Discrimination ===
+    Sign flip → likely noise (update estimate). No flip → likely movement (decay estimate). */
     float new_sample = is_noise_sample ? abs_f(current_residual) : 0.0f;
     
     float old_noise = axis->_noise_estimate_norm;
@@ -433,7 +435,7 @@ bool smooth_axis_has_new_value(smooth_axis_t *axis) {
     
     if (in_sticky_zone || diff > dynamic_threshold) {
         axis->_last_reported_norm = current;
-    
+        
         SMOOTH_DEBUGF("new value: %.3f (diff=%.4f thresh=%.4f %s)",
                       current,
                       diff,

@@ -13,6 +13,8 @@ import matplotlib.pyplot as plt
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Tuple, Any
 
+# Multiplier = 3.0 (Sigma Scaling}) X 1.25 (MAD Correction) X 2.0 (Zero-Injection) = 7.5
+RAW_NOISE_RMS_TO_PTP_MULTIPLIER = 7.5
 
 # ============================
 # CONFIGURATION
@@ -22,7 +24,6 @@ class Config:
     OUTPUT_DIR = "tests/data/renders"
     MIN_THRESH = 3.0
     MAX_THRESH = 31.0
-
     # Constants
     MOTION_END_T = 1.0
 
@@ -382,7 +383,17 @@ class EvidenceBoardPlotter:
 
         # Setup Axes
         ax.set_ylim(0, 1023)
-        ax.set_yticks([0, 102, 250, 500, 750, 921, 1023])
+        # ax.set_yticks([0, 102, 250, 500, 750, 921, 1023])
+        ax.set_yticks(
+            [102, 255, 511, 767, 921],
+            ["10%", "25%", "50%", "75%", "90%"]
+        )
+
+        # Draw Diagnostics
+        if noise_u16 is not None:
+            ax.plot(df["t_sec"], noise_u16, linewidth=1.5, linestyle="--", color=Config.COLOR_NOISE_LINE, alpha=0.8)
+        if thresh_u16 is not None:
+            ax.plot(df["t_sec"], thresh_u16, linewidth=1.5, linestyle=":", color=Config.COLOR_THRESH_LINE, alpha=0.3)
 
         # Draw Signals
         ax.plot(df["t_sec"], df["raw_base"], linewidth=0.2, color=Config.COLOR_BASELINE)
@@ -394,17 +405,12 @@ class EvidenceBoardPlotter:
         events = df[df["has_new"] == 1]
         ax.scatter(events["t_sec"], events["out_u16"], s=3, color=Config.COLOR_EVENT)
 
-        # Draw Diagnostics
-        if noise_u16 is not None:
-            ax.plot(df["t_sec"], noise_u16, linewidth=1.5, linestyle="--", color=Config.COLOR_NOISE_LINE)
-        if thresh_u16 is not None:
-            ax.plot(df["t_sec"], thresh_u16, linewidth=1.5, linestyle=":", color=Config.COLOR_THRESH_LINE, alpha=0.5)
 
         # Update Stats
         self._add_update_stats_text(ax, df)
 
         # Settle Time Analysis (Calculates Error)
-        self._add_settle_time_analysis(ax, df, Config.MOTION_END_T, meta.settle_time)
+        # self._add_settle_time_analysis(ax, df, Config.MOTION_END_T, meta.settle_time)
 
         # Labels
         if is_top:
@@ -416,7 +422,8 @@ class EvidenceBoardPlotter:
         noise_u16 = None
         thresh_u16 = None
         if "noise_norm" in df.columns and "thresh_norm" in df.columns:
-            noise_u16 = df["noise_norm"] * 1023.0
+            noise_u16 = df["noise_norm"] * RAW_NOISE_RMS_TO_PTP_MULTIPLIER * 1023
+            # noise_u16 = Utils.map_ranges(noise_u16,0,1,0,1020)
             thresh_u16 = Utils.map_ranges(df["thresh_norm"] * 1023, Config.MIN_THRESH, Config.MAX_THRESH, 0, 1022)
         return noise_u16, thresh_u16
 
@@ -470,12 +477,12 @@ class EvidenceBoardPlotter:
                 plt.Line2D([0], [0], color=Config.COLOR_BASELINE, linewidth=1.3, label="Baseline (reference)"),
                 plt.Line2D([0], [0], color=Config.COLOR_NOISY, linewidth=1.0, alpha=0.4, label="Noisy Signal"),
                 plt.Line2D([0], [0], color=Config.COLOR_SMOOTH, linewidth=2.0, label="Smooth Axis"),
-                plt.Line2D([0], [0], marker="o", linestyle='', color=Config.COLOR_SMOOTH, markersize=4,
+                plt.Line2D([0], [0], marker="o", linestyle='', color=Config.COLOR_EVENT, markersize=3,
                            label="Update Event"),
                 plt.Line2D([0], [0], linestyle="--", color=Config.COLOR_NOISE_LINE, linewidth=1.5,
-                           label="Noise level (×1023)"),
+                           label="Noise Estimate (%)"),
                 plt.Line2D([0], [0], linestyle=":", color=Config.COLOR_THRESH_LINE, linewidth=1.5,
-                           label="Noise activation"),
+                           label="Threshold Activation (%)"),
         ]
 
         fig.legend(handles=legend_handles, loc="lower center", ncol=6, frameon=False, bbox_to_anchor=(0.5, 0.03))

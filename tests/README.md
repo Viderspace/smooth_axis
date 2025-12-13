@@ -69,19 +69,19 @@ If you need to compile tests manually (without Make):
 #### Ramp test
 
 ```bash
-gcc -Wall -I./src -o build/ramp_test tests/ramp_response_test.c src/smooth_axis.c -lm
+gcc -Wall -I./src -o build/ramp_test tests/c_tests/ramp_response_test.c src/smooth_axis.c -lm
 ```
 
 #### Step test
 
 ```bash
-gcc -Wall -I./src -o build/step_test tests/step_response_test.c src/smooth_axis.c -lm
+gcc -Wall -I./src -o build/step_test tests/c_tests/step_response_test.c src/smooth_axis.c -lm
 ```
 
 #### API test (must use -DNDEBUG for release mode)
 
 ```bash
-gcc -Wall -DNDEBUG -I./src -o build/test_api tests/test_api_sanity_enhanced.c src/smooth_axis.c -lm
+gcc -Wall -DNDEBUG -I./src -o build/test_api tests/c_tests/test_api_sanity_enhanced.c src/smooth_axis.c -lm
 ```
 
 #### Run tests (must run from project root!)
