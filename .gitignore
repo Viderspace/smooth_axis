@@ -44,3 +44,5 @@ tests/py_scripts/*.pyc
 
 # Archived/legacy code
 archived/
+# Moved to arduino's wrapper repo
+/archived/ports/
